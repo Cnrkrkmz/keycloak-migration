@@ -3,6 +3,7 @@ import subprocess
 import json
 import os
 import sys
+import argparse
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -203,37 +204,92 @@ def rollback_kc_user(username):
 
 
 # ------------------------------------------------------------------------------
+# DURUM TESPİTİ — APIC ve KC'ye bakarak gerçek durumu öğren
+# ------------------------------------------------------------------------------
+
+def detect_apic_email_parked(username):
+    """
+    APIC'ten kullanıcının mevcut e-postasını okur.
+    E-posta '-old@' içeriyorsa email park edilmiş demektir → True döner.
+    Kullanıcı bulunamazsa veya e-posta okunamazsa None döner.
+    """
+    cmd = [
+        "apic", "users:get", username,
+        "-s", APIC_SERVER, "-o", PROV_ORG,
+        "--user-registry", LOCAL_REGISTRY,
+        "--format", "json", "--output", "-",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(res.stdout)
+        email = data.get("email", "")
+        return "-old@" in email, email
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.strip() or e.stdout.strip()
+        print(f"--> [UYARI] APIC'ten e-posta okunamadı ({username}): {err}")
+        return None, None
+    except Exception as e:
+        print(f"--> [UYARI] APIC'ten e-posta okunamadı ({username}): {e}")
+        return None, None
+
+
+def derive_original_email(parked_email):
+    """'-old@' suffix'ini kaldırarak orijinal e-postayı hesaplar."""
+    if parked_email and "-old@" in parked_email:
+        return parked_email.replace("-old@", "@")
+    return parked_email
+
+
+# ------------------------------------------------------------------------------
 # ROLLBACK ORKESTRATÖRü
 # ------------------------------------------------------------------------------
 
-def rollback_user(csv_row):
+def rollback_user(csv_row, force=False):
     """
     Tek bir kullanıcı için tamamlanmış adımları ters sırayla geri alır.
     Herhangi bir adım başarısız olursa durur ve False döner.
+
+    force=True: CSV flag'lerine bakmadan APIC ve KC'ye bakarak gerçek
+                durumu tespit eder. CSV'nin eski/eksik olduğu durumlarda kullan.
     """
     username       = csv_row["username"]
-    original_email = csv_row["src_email"]
+    original_email = csv_row.get("src_email", "")
 
     print(f"\n{'='*50}")
-    print(f"  ROLLBACK: {username}")
+    print(f"  ROLLBACK: {username}{'  [FORCE]' if force else ''}")
     print(f"{'='*50}")
 
-    # R1: apic_jit_done → shadow user sil
-    if csv_row.get("apic_jit_done", "false").lower() == "true":
+    # Force modunda flag'leri gerçek durumdan hesapla
+    if force:
+        parked, current_email = detect_apic_email_parked(username)
+        kc_exists = bool(_get_kc_uuid(username))
+        do_r2 = (parked is True)
+        do_r3 = kc_exists
+        # original_email: CSV'de -old@ ile yazılmışsa gerçek e-postayı hesapla
+        if not original_email or "-old@" in original_email:
+            original_email = derive_original_email(current_email or original_email)
+        print(f"--> [FORCE] APIC e-posta parked={parked}  KC exists={kc_exists}")
+        print(f"--> [FORCE] Geri alınacak orijinal e-posta: {original_email}")
+    else:
+        do_r2 = csv_row.get("apic_email_parked", "false").lower() == "true"
+        do_r3 = csv_row.get("kc_user_created",   "false").lower() == "true"
+
+    # R1: apic_jit_done → shadow user sil (force modda her zaman dene)
+    if force or csv_row.get("apic_jit_done", "false").lower() == "true":
         print("--> [R1] APIC shadow user siliniyor...")
         if not rollback_apic_shadow_user(username):
             print(f"--> [DURDURULDU] '{username}' rollback R1'de başarısız oldu.")
             return False
 
     # R2: apic_email_parked → orijinal e-postaya dön
-    if csv_row.get("apic_email_parked", "false").lower() == "true":
-        print("--> [R2] APIC e-postası orijinaline geri alınıyor...")
+    if do_r2:
+        print(f"--> [R2] APIC e-postası '{original_email}' olarak geri alınıyor...")
         if not rollback_apic_email(username, original_email):
             print(f"--> [DURDURULDU] '{username}' rollback R2'de başarısız oldu.")
             return False
 
     # R3: kc_user_created → KC kullanıcısını sil
-    if csv_row.get("kc_user_created", "false").lower() == "true":
+    if do_r3:
         print("--> [R3] Keycloak kullanıcısı siliniyor...")
         if not rollback_kc_user(username):
             print(f"--> [DURDURULDU] '{username}' rollback R3'de başarısız oldu.")
@@ -249,24 +305,40 @@ def rollback_user(csv_row):
 # ------------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) > 1:
-        # Tek kullanıcı rollback: python 05_rollback.py <username>
-        target = sys.argv[1]
-        csv_row = get_user(target)
+    parser = argparse.ArgumentParser(
+        description="Migration adımlarını geri alır."
+    )
+    parser.add_argument("username", nargs="?", help="Tek kullanıcı rollback (opsiyonel)")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="CSV flag'lerine bakmadan APIC ve KC'ye bakarak gerçek durumu tespit et ve geri al"
+    )
+    args = parser.parse_args()
+
+    if args.username:
+        csv_row = get_user(args.username)
         if not csv_row:
-            print(f"--> [HATA] '{target}' CSV'de bulunamadı.")
-            sys.exit(1)
-        success = rollback_user(csv_row)
+            # --force ile CSV'de olmayan kullanıcı da rollback edilebilir
+            if args.force:
+                csv_row = {"username": args.username, "src_email": ""}
+            else:
+                print(f"--> [HATA] '{args.username}' CSV'de bulunamadı.")
+                sys.exit(1)
+        success = rollback_user(csv_row, force=args.force)
         sys.exit(0 if success else 1)
     else:
-        # Tüm migrated=false (yarıda kalmış) kullanıcıları rollback et
         pending = get_pending_users()
-        # Hiçbir flag set edilmemişleri (henüz dokunulmamışları) filtrele
-        to_rollback = [
-            u for u in pending
-            if any(u.get(f, "false").lower() == "true"
-                   for f in ("kc_user_created", "apic_email_parked", "apic_jit_done", "org_owner_xfrd"))
-        ]
+
+        if args.force:
+            # Force modda tüm pending kullanıcıları işle (flag durumuna bakma)
+            to_rollback = pending
+        else:
+            # Normal modda sadece en az bir flag'i true olanları al
+            to_rollback = [
+                u for u in pending
+                if any(u.get(f, "false").lower() == "true"
+                       for f in ("kc_user_created", "apic_email_parked", "apic_jit_done", "org_owner_xfrd"))
+            ]
 
         if not to_rollback:
             print("--> [BİLGİ] Rollback gereken kullanıcı yok.")
@@ -275,7 +347,7 @@ def main():
         print(f"--> {len(to_rollback)} kullanıcı için rollback başlatılıyor...\n")
         failed = []
         for row in to_rollback:
-            if not rollback_user(row):
+            if not rollback_user(row, force=args.force):
                 failed.append(row["username"])
 
         print("\n" + "="*50)
