@@ -158,7 +158,7 @@ def trigger_apic_oidc_login(kc_user_token):
 
     payload = json.dumps({
         "realm":        f"provider/{KEYCLOAK_REGISTRY}",
-        "access_token": kc_user_token,
+        "assertion":    kc_user_token,
         "grant_type":   "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "client_id":    apic_client_id,
         "client_secret": apic_client_secret,
