@@ -192,40 +192,73 @@ def print_status():
     """
     Tüm kullanıcıların migration durumunu SOURCE | TARGET formatında
     tablo olarak ekrana basar.
+
+    Gösterim:
+      SOURCE  : username  consumer_org  src_email
+      TARGET  : tgt_email  kc  email  jit  xfrd
+      DURUM   : migrated  migrated_at
+    Flag değerleri okunabilirlik için kısaltılır: true→Y  false→-
     """
     rows = load_users()
     if not rows:
         print(f"--> [BİLGİ] '{CSV_FILE}' boş veya mevcut değil.")
         return
 
-    # Sütun grupları
-    src_fields = ["username", "consumer_org", "src_email"]
-    tgt_fields = ["tgt_email", "kc_user_created", "apic_email_parked",
-                  "apic_jit_done", "org_owner_xfrd", "migrated", "migrated_at"]
+    # Sütun tanımları  (başlık_kısa, alan_adı)
+    src_cols = [
+        ("username",     "username"),
+        ("consumer_org", "consumer_org"),
+        ("src_email",    "src_email"),
+    ]
+    tgt_cols = [
+        ("tgt_email",    "tgt_email"),
+        ("kc",           "kc_user_created"),
+        ("email_p",      "apic_email_parked"),
+        ("jit",          "apic_jit_done"),
+        ("xfrd",         "org_owner_xfrd"),
+    ]
+    st_cols = [
+        ("ok",           "migrated"),
+        ("migrated_at",  "migrated_at"),
+    ]
 
-    def col_w(fields):
-        return [max(len(f), max((len(r.get(f, "")) for r in rows), default=0))
-                for f in fields]
+    def _val(row, field):
+        v = row.get(field, "")
+        if v == "true":  return "Y"
+        if v == "false": return "-"
+        return v
 
-    sw = col_w(src_fields)
-    tw = col_w(tgt_fields)
+    def _colw(cols):
+        return [
+            max(len(hdr), max((len(_val(r, fld)) for r in rows), default=0))
+            for hdr, fld in cols
+        ]
 
-    src_w_total = sum(sw) + 2 * (len(sw) - 1)
-    tgt_w_total = sum(tw) + 2 * (len(tw) - 1)
+    sw = _colw(src_cols)
+    tw = _colw(tgt_cols)
+    dw = _colw(st_cols)
 
-    src_hdr = "  ".join(f.ljust(sw[i]) for i, f in enumerate(src_fields))
-    tgt_hdr = "  ".join(f.ljust(tw[i]) for i, f in enumerate(tgt_fields))
-    sep_line = "─" * (src_w_total + 4 + tgt_w_total)
+    def _row_str(cols, widths, row):
+        return "  ".join(_val(row, fld).ljust(widths[i]) for i, (_, fld) in enumerate(cols))
+
+    def _hdr_str(cols, widths):
+        return "  ".join(hdr.ljust(widths[i]) for i, (hdr, _) in enumerate(cols))
+
+    src_w = sum(sw) + 2 * (len(sw) - 1)
+    tgt_w = sum(tw) + 2 * (len(tw) - 1)
+    st_w  = sum(dw) + 2 * (len(dw) - 1)
+    total = src_w + 4 + tgt_w + 4 + st_w
 
     print()
-    print(f"{'── SOURCE ':─<{src_w_total + 2}}  {'── TARGET ':─<{tgt_w_total}}")
-    print(f"{src_hdr}  │  {tgt_hdr}")
-    print(sep_line)
-
+    # Grup başlıkları
+    print(f"  {'SOURCE':<{src_w}}  |  {'TARGET':<{tgt_w}}  |  {'DURUM':<{st_w}}")
+    print(f"  {'-' * src_w}  |  {'-' * tgt_w}  |  {'-' * st_w}")
+    # Sütun başlıkları
+    print(f"  {_hdr_str(src_cols, sw)}  |  {_hdr_str(tgt_cols, tw)}  |  {_hdr_str(st_cols, dw)}")
+    print(f"  {'=' * total}")
+    # Satırlar
     for row in rows:
-        src_part = "  ".join(row.get(f, "").ljust(sw[i]) for i, f in enumerate(src_fields))
-        tgt_part = "  ".join(row.get(f, "").ljust(tw[i]) for i, f in enumerate(tgt_fields))
-        print(f"{src_part}  │  {tgt_part}")
+        print(f"  {_row_str(src_cols, sw, row)}  |  {_row_str(tgt_cols, tw, row)}  |  {_row_str(st_cols, dw, row)}")
     print()
 
 
