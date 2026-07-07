@@ -55,7 +55,7 @@ KEYCLOAK_URL       = os.environ.get("KEYCLOAK_URL")
 KEYCLOAK_ADMIN_USER     = os.environ.get("KEYCLOAK_ADMIN_USER")
 KEYCLOAK_ADMIN_PASSWORD = os.environ.get("KEYCLOAK_ADMIN_PASSWORD")
 TARGET_REALM       = os.environ.get("KEYCLOAK_REALM_NAME", "apic-demo")
-
+CATALOG            = os.environ.get("CATALOG", "sandbox")
 # The Keycloak client that APIC uses for OIDC — must allow password grant & have
 # "Direct Access Grants" enabled in KC.  Usually the same client registered in the
 # APIC user-registry.  Override via env var if needed.
@@ -128,53 +128,42 @@ def get_kc_user_token(username, password):
 # ------------------------------------------------------------------------------
 
 def trigger_apic_oidc_login(kc_user_token):
-    """
-    POSTs the Keycloak user token to APIC's /api/token endpoint.
-    APIC validates it via OIDC, resolves the 'sub' claim to a username, and
-    auto-creates (JIT-provisions) the shadow user in its own database.
-
-    The request body follows the APIC Platform API spec:
-        POST /api/token
-        { "realm": "provider/<registry-name>",
-          "access_token": "<keycloak-jwt>",
-          "client_id": "...", "client_secret": "...",
-          "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer" }
-    """
-    url = f"{APIC_SERVER}/api/token"
-
-    # Load APIC client credentials from the file referenced in the env (if set).
-    # The credentials.json must contain 'client_id' and 'client_secret'.
+    url = f"{APIC_SERVER}/api/token" # Varsayılan fallback
+    
     creds_file = os.environ.get("APIC_CLIENT_CREDS", "")
     apic_client_id     = ""
     apic_client_secret = ""
-    
+
     if creds_file and os.path.exists(creds_file):
         try:
             with open(creds_file) as f:
                 creds = json.load(f)
 
-            # Önce 'toolkit' alt objesine bak, yoksa üst seviyeden oku
-            toolkit_creds = creds.get("toolkit", {})
+            # DEĞİŞİKLİK 1: Provider toolkit değil, consumer_toolkit kullanılmalı!
+            toolkit_creds = creds.get("consumer_toolkit", {})
+            
+            # Eğer endpoint JSON içinde varsa URL'yi Consumer API'ye yönlendir
+            if "endpoint" in toolkit_creds:
+                url = f"{toolkit_creds['endpoint']}/token"
 
             apic_client_id     = toolkit_creds.get("client_id") or creds.get("client_id", "")
             apic_client_secret = toolkit_creds.get("client_secret") or creds.get("client_secret", "")
         except Exception as e:
             print(f"--> [UYARI] Kimlik dosyası okunamadı: {e}")
 
-    # Değerler hala boşsa süreci durdur ve dosya içeriğini ekrana bas
     if not apic_client_id or not apic_client_secret:
         print(f"--> [HATA] '{creds_file}' içinden client_id veya client_secret okunamadı!")
-        try:
-            print(f"--> Okunan JSON içeriği: {creds}")
-        except:
-            pass
         return False
 
+    # DEĞİŞİKLİK 2: Consumer kullanıcıları için Realm formatı
+    # Örnek: consumer:caner-script-provider:sandbox:keycluk
+    realm_str = f"consumer:{PROV_ORG}:{CATALOG}:{KEYCLOAK_REGISTRY}"
+
     payload = json.dumps({
-        "realm":        f"provider/{KEYCLOAK_REGISTRY}",
-        "assertion":    kc_user_token,
-        "grant_type":   "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        "client_id":    apic_client_id,
+        "realm":         realm_str,
+        "assertion":     kc_user_token,
+        "grant_type":    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "client_id":     apic_client_id,
         "client_secret": apic_client_secret,
     }).encode("utf-8")
 
@@ -196,7 +185,6 @@ def trigger_apic_oidc_login(kc_user_token):
             return False
     except urllib.error.HTTPError as e:
         err_body = e.read().decode()
-        # 400 with "already exists" or similar → user was already provisioned, treat as success
         if e.code == 400 and "already" in err_body.lower():
             print("--> [BİLGİ] Kullanıcı APIC üzerinde zaten mevcut.")
             return True
@@ -205,7 +193,6 @@ def trigger_apic_oidc_login(kc_user_token):
     except Exception as e:
         print(f"--> [HATA] APIC OIDC login isteği sırasında hata: {e}")
         return False
-
 
 # ------------------------------------------------------------------------------
 # CLEANUP
