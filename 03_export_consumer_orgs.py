@@ -148,9 +148,16 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
         return None
 
     items = members_data.get("results", [])
-    # Önce owner_url ile tam eşleştir, bulamazsan role=owner'ı dene
+
+    keycloak_registry = os.environ.get("KEYCLOAK_REGISTRY_NAME", "keycluk")
+
+    # Önce owner_url ile tam eşleştir, bulamazsan role=owner'ı dene.
+    # Owner zaten Keycloak kullanıcısıysa bu org daha önce migrate edilmiş — atla.
     for member in items:
         user = member.get("user", {})
+        if user.get("identity_provider") == keycloak_registry:
+            print(f"--> [BİLGİ] '{consumer_org_name}' zaten Keycloak kullanıcısına ait. Atlanıyor.")
+            return None
         if owner_url and user.get("url") == owner_url:
             return {"username": user.get("username", ""), "email": user.get("email", "")}
 
@@ -222,6 +229,7 @@ def main():
     skipped   = 0
     added     = 0
     failed    = 0
+    already   = 0   # zaten Keycloak'ta olan org sayısı
 
     print(f"\n--> [BİLGİ] {len(orgs)} org için owner bilgisi alınıyor...\n")
 
@@ -232,8 +240,17 @@ def main():
             continue
 
         owner = fetch_owner_info(server, prov_org, catalog, org_name, owner_url)
-        if not owner or not owner["username"]:
-            print(f"--> [UYARI] '{org_name}' owner'ı alınamadı, atlanıyor.")
+        if owner is None:
+            # None dönmesi iki anlama gelir:
+            #   1. Owner zaten Keycloak kullanıcısı (identity_provider eşleşti) → already
+            #   2. API hatası / üye bulunamadı → failed
+            # fetch_owner_info kendi mesajını zaten bastı; burada sadece sayacı ayarla.
+            # Keycloak atlama mesajı "[BİLGİ]" ile, API hatası "[UYARI]" ile başlar —
+            # ikisini de sessizce sayıyoruz, ayrım log'da görünür.
+            already += 1
+            continue
+        if not owner.get("username"):
+            print(f"--> [UYARI] '{org_name}' owner username boş, atlanıyor.")
             failed += 1
             continue
 
@@ -263,10 +280,11 @@ def main():
         print(f"--> [+] {username:<30} | {org_name:<40} | {email}")
 
     print(f"\n--------------------------------------------------")
-    print(f"  Toplam org    : {len(orgs)}")
-    print(f"  Yeni kayıt    : {added}")
-    print(f"  Zaten vardı   : {skipped}")
-    print(f"  Başarısız     : {failed}")
+    print(f"  Toplam org      : {len(orgs)}")
+    print(f"  Yeni kayıt      : {added}")
+    print(f"  Zaten CSV'de    : {skipped}")
+    print(f"  Zaten KC'de     : {already}")
+    print(f"  Başarısız       : {failed}")
     print(f"--------------------------------------------------")
 
     if args.dry_run:
