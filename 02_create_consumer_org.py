@@ -5,12 +5,12 @@ import os
 import sys
 
 # ==============================================================================
-# APIC CONSUMER ORG OLUŞTURMA SCRİPTİ
-# ==============================================================================
-# Çalıştırma sırası: 00 (test ortamı hazırlığı — migration öncesi)
+# 02_create_consumer_org.py — Test amaçlı Consumer Org oluşturma
+# Çalıştırma sırası: 02 (opsiyonel, test ortamı hazırlığı)
 #
 # Verilen isimde bir Consumer Org oluşturur ve owner olarak belirtilen
 # kullanıcıyı (Local Registry'den) atar.
+# Gereksinim: 00_setup_env.py + 01_create_test_user.py önceden çalışmış olmalı.
 # ==============================================================================
 
 ENV_FILE = "migration_env.sh"
@@ -95,7 +95,7 @@ def main():
     print(f"\n--> [1/2] '{owner_username}' kullanıcısının URL'si alınıyor...")
     owner_url = get_user_url(owner_username)
     if not owner_url:
-        print(f"--> [HATA] '{owner_username}' Local Registry'de bulunamadı. Önce 01_create_test_user.py'i çalıştırın.")
+        print(f"--> [HATA] '{owner_username}' Local Registry'de bulunamadı. Önce 01_create_test_user.py'yi çalıştırın.")
         sys.exit(1)
 
     print(f"--> [2/2] Consumer Org oluşturuluyor...")

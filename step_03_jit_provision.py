@@ -9,11 +9,11 @@ import urllib.error
 from migration_state import get_user, update_flag, mark_migrated
 
 # ==============================================================================
-# APIC SHADOW USER — JIT PROVISION VIA OIDC LOGIN (NO manual users:create)
-# ==============================================================================
+# step_03_jit_provision.py — APIC'te shadow user JIT provision (OIDC login)
+# Çalıştıran: 04_run_migration.py (adım 3/4)
 #
 # HOW IT WORKS:
-#   1. 02_migration_apic_to_kc.py Keycloak'ta kullanıcıyı yaratırken ürettiği
+#   1. step_01_create_kc_user.py Keycloak'ta kullanıcıyı yaratırken ürettiği
 #      geçici şifreyi migration_env.sh'a (KC_TEMP_PASSWORD) kaydeder.
 #   2. Bu script o şifreyi okuyarak kullanıcı adına gerçek bir Keycloak OIDC
 #      token'ı alır.

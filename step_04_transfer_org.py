@@ -7,9 +7,8 @@ import sys
 from migration_state import get_user, update_flag, mark_migrated
 
 # ==============================================================================
-# APIC CONSUMER ORG SAHİPLİK DEVRİ
-# ==============================================================================
-# Çalıştırma sırası: 06 (05_apic_jit_provision.py'den sonra)
+# step_04_transfer_org.py — Consumer Org sahipliğini Keycloak profiline devret
+# Çalıştıran: 04_run_migration.py (adım 4/4)
 #
 # Bir Consumer Org'un sahipliğini (ve --cascade ile tüm Apps + Subscriptions'larını)
 # eski Local Registry kullanıcısından yeni Keycloak kullanıcısına devreder.

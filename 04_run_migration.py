@@ -1,24 +1,24 @@
 #!/usr/bin/env python3.11
 """
-06_run_migration_batch.py — Toplu migration orkestratörü.
+04_run_migration.py — Toplu migration orkestratörü.
 
 CSV dosyasındaki (migration_users.csv) migrate edilmemiş kullanıcıları
 10'ar kullanıcılık batch'ler halinde işler.
 
 Her kullanıcı için sırayla şu adımları çalıştırır:
-  1. 03_migrate_user_to_keycloak.py  → Keycloak'ta kullanıcı yarat
-  2. 04_update_apic_email.py         → APIC e-postasını -old yap (email_target CSV'ye canlı yazılır)
-  3. 05_apic_jit_provision.py        → APIC JIT provision (OIDC login)
-  4. _transfer_consumer_org.py       → Consumer Org sahipliğini Keycloak profiline devret
+  1. step_01_create_kc_user.py    → Keycloak'ta kullanıcı yarat
+  2. step_02_park_apic_email.py   → APIC e-postasını -old yap
+  3. step_03_jit_provision.py     → APIC JIT provision (OIDC login)
+  4. step_04_transfer_org.py      → Consumer Org sahipliğini Keycloak profiline devret
 
 Her 10 kullanıcı tamamlandığında özet rapor ekrana basılır.
 Batch içinde bir kullanıcı başarısız olursa o kullanıcı atlanır
 (migrated=false kalır) ve bir sonrakiyle devam edilir.
 
 Kullanım:
-  python 06_run_migration_batch.py              # tüm pending kullanıcılar
-  python 06_run_migration_batch.py --batch-size 5   # özel batch boyutu
-  python 06_run_migration_batch.py --dry-run    # adımları yazdır, çalıştırma
+  python 04_run_migration.py                    # tüm pending kullanıcılar
+  python 04_run_migration.py --batch-size 5     # özel batch boyutu
+  python 04_run_migration.py --dry-run          # adımları yazdır, çalıştırma
 """
 
 import os
@@ -65,10 +65,10 @@ def migrate_user(username, dry_run=False):
     Başarı True, herhangi bir adım başarısız olursa False döner.
     """
     steps = [
-        ("03_migrate_user_to_keycloak.py", "1/4 KC_CREATE "),
-        ("04_update_apic_email.py",        "2/4 EMAIL_UPD "),
-        ("05_apic_jit_provision.py",       "3/4 JIT_PROV  "),
-        ("_transfer_consumer_org.py",      "4/4 ORG_XFER  "),
+        ("step_01_create_kc_user.py",  "1/4 KC_CREATE "),
+        ("step_02_park_apic_email.py", "2/4 EMAIL_UPD "),
+        ("step_03_jit_provision.py",   "3/4 JIT_PROV  "),
+        ("step_04_transfer_org.py",    "4/4 ORG_XFER  "),
     ]
 
     if dry_run:
@@ -158,7 +158,8 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="migration_users.csv'deki kullanıcıları batch olarak migrate eder."
+        description="migration_users.csv'deki kullanıcıları batch olarak migrate eder.",
+        prog="04_run_migration.py"
     )
     parser.add_argument(
         "--batch-size", type=int, default=BATCH_SIZE,

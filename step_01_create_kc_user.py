@@ -12,7 +12,8 @@ from migration_state import get_user, add_user, update_flag
 # add_user imzası: add_user(username, consumer_org, email_source)
 
 # ==============================================================================
-# APIC TO KEYCLOAK MIGRATION (OBJECT-ORIENTED & IN-MEMORY)
+# step_01_create_kc_user.py — Keycloak kullanıcısı oluşturma
+# Çalıştıran: 04_run_migration.py (adım 1/4)
 # ==============================================================================
 
 ENV_FILE = "migration_env.sh"
@@ -50,7 +51,7 @@ else:
     DEMO_USERNAME = input("Migrate edilecek APIC Kullanıcı Adı: ").strip()
 
 # Consumer Org bilgisi CSV'den gelir (add_user çağrısında); fallback olarak env'den okunur
-CONSUMER_ORG = os.environ.get("CONSUMER_ORG", "")
+CONSUMER_ORG = os.environ.get("CONSUMER_ORG", "")   # fallback; asıl değer CSV'den gelir
 
 # ------------------------------------------------------------------------------
 # KULLANICI OBJESİ (CLASS)

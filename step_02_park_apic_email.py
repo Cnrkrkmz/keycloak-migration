@@ -7,7 +7,8 @@ import sys
 from migration_state import get_user, update_flag, update_email_target
 
 # ==============================================================================
-# APIC KULLANICI E-POSTA GÜNCELLEME SCRİPTİ (IN-MEMORY & AUTO '-old' SUFFIX)
+# step_02_park_apic_email.py — APIC e-postasını -old suffix ile park et
+# Çalıştıran: 04_run_migration.py (adım 2/4)
 # ==============================================================================
 
 ENV_FILE = "migration_env.sh"
