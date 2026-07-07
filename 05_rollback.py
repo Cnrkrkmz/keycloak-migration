@@ -239,9 +239,13 @@ def detect_apic_email_parked(username):
 
 
 def derive_target_email(source_email):
-    """'-old@' suffix'ini kaldırarak hedef e-postayı hesaplar."""
-    if source_email and "-old@" in source_email:
-        return source_email.replace("-old@", "@")
+    """Ne kadar '-old' suffix'i varsa hepsini temizleyerek orijinal hedef e-postayı hesaplar."""
+    if source_email and "@" in source_email:
+        parts = source_email.split("@")
+        username_part = parts[0]
+        while username_part.endswith("-old"):
+            username_part = username_part[:-4]
+        return f"{username_part}@{parts[1]}"
     return source_email
 
 

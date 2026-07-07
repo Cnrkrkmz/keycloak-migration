@@ -106,9 +106,13 @@ def main():
         print(f"--> [HATA] Kullanıcının geçerli bir e-posta adresi bulunamadı! (Mevcut değer: '{old_email}')")
         sys.exit(1)
 
-    # Otomatik '-old' ekleme mantığı
-    email_parts = old_email.split("@")
-    new_email = f"{email_parts[0]}-old@{email_parts[1]}"
+    # Otomatik '-old' ekleme mantığı — zaten park edildiyse tekrar ekleme
+    if old_email.split("@")[0].endswith("-old"):
+        print(f"--> [BİLGİ] E-posta zaten park edilmiş durumda. Tekrar eklenmeyecek.")
+        new_email = old_email
+    else:
+        email_parts = old_email.split("@")
+        new_email = f"{email_parts[0]}-old@{email_parts[1]}"
 
     print(f"--> E-posta (source) : {old_email}")
     print(f"--> E-posta (target) : {new_email}")
