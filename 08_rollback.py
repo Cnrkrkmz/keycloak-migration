@@ -94,28 +94,35 @@ def rollback_apic_shadow_user(username):
 
 def rollback_apic_email(username, original_email):
     """APIC Local Registry'de e-postayı orijinal değere geri yazar."""
-    # Mevcut veriyi oku
+    # Mevcut first_name/last_name'i almaya çalış — başarısız olursa boş bırak,
+    # users:update email-only güncellemeyi kabul eder.
     cmd_get = [
         "apic", "users:get", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
         "--user-registry", LOCAL_REGISTRY,
         "--format", "json", "--output", "-",
     ]
+    first_name = ""
+    last_name  = ""
     try:
         res = subprocess.run(cmd_get, capture_output=True, text=True, check=True)
         current = json.loads(res.stdout)
+        first_name = current.get("first_name") or current.get("firstName") or ""
+        last_name  = current.get("last_name")  or current.get("lastName")  or ""
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.strip() or e.stdout.strip()
+        print(f"--> [UYARI] Kullanıcı detayı alınamadı, güncelleme yine de denenecek: {err}")
     except Exception as e:
-        print(f"--> [HATA] APIC kullanıcı verisi okunamadı: {e}")
-        return False
-
-    first_name = current.get("first_name") or current.get("firstName") or ""
-    last_name  = current.get("last_name")  or current.get("lastName")  or ""
+        print(f"--> [UYARI] Kullanıcı detayı alınamadı, güncelleme yine de denenecek: {e}")
 
     yaml_content = f"""email: {original_email}
-first_name: {first_name}
-last_name: {last_name}
 title: {username}
 """
+    if first_name:
+        yaml_content += f"first_name: {first_name}\n"
+    if last_name:
+        yaml_content += f"last_name: {last_name}\n"
+
     cmd_upd = [
         "apic", "users:update", username, "-",
         "-s", APIC_SERVER, "-o", PROV_ORG,

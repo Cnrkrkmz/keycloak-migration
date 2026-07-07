@@ -112,11 +112,6 @@ def main():
     print(f"--> E-posta (source) : {old_email}")
     print(f"--> E-posta (target) : {new_email}")
 
-    onay = input("\n--> Güncelleme işlemine devam edilsin mi? [Y/n]: ").strip().lower()
-    if onay == 'n':
-        print("--> [İPTAL] İşlem durduruldu.")
-        sys.exit(0)
-
     print("\n--> [2/3] APIC Local Registry (in-memory) güncelleniyor...")
     success = update_user_email(TARGET_USERNAME, current_data, new_email)
 

@@ -26,7 +26,7 @@ import sys
 import subprocess
 import argparse
 
-from migration_state import load_users, get_pending_users, print_status
+from migration_state import load_users, get_pending_users, print_status, write_status_report
 
 ENV_FILE   = "migration_env.sh"
 BATCH_SIZE = 10
@@ -90,8 +90,9 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False):
     pending = get_pending_users()
 
     if not pending:
-        print("--> [BİLGİ] Migration gereken kullanıcı yok. CSV durumu:")
-        print_status()
+        print("--> [BİLGİ] Migration gereken kullanıcı yok.")
+        rpt = write_status_report()
+        print(f"--> [BİLGİ] Güncel durum: {rpt}")
         return
 
     total      = len(pending)
@@ -136,9 +137,9 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False):
         if b_failed_users:
             print(f"  Başarısız: {', '.join(b_failed_users)}")
 
-        # Canlı CSV durumu
-        print(f"\n  [CSV SNAPSHOT — Batch {batch_no} sonu]")
-        print_status()
+        # Canlı CSV durumunu dosyaya yaz
+        rpt = write_status_report()
+        print(f"\n  [SNAPSHOT] Batch {batch_no} sonu → {rpt}")
 
     # Genel özet
     print(f"\n{'='*60}")

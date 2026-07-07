@@ -43,9 +43,11 @@ def setup_environment():
     print("\n--- KEYCLOAK Bilgileri ---")
     env_vars["KEYCLOAK_URL"] = get_input_with_default("KEYCLOAK URL", "http://keycloak-keycloak-demo.apps.ocpinstall.gym.lan")
     env_vars["KEYCLOAK_ADMIN_USER"] = get_input_with_default("KEYCLOAK Admin Username", "admin")
-    env_vars["KEYCLOAK_ADMIN_PASSWORD"] = get_input_with_default("KEYCLOAK Admin Password", "Admin123!")
+    env_vars["KEYCLOAK_ADMIN_PASSWORD"] = get_input_with_default("KEYCLOAK Admin Password", "Admin123!", is_password=True)
     env_vars["KEYCLOAK_REGISTRY_NAME"] = get_input_with_default("KEYCLOAK Registry Name", "keycluk")
     env_vars["KEYCLOAK_REALM_NAME"] = get_input_with_default("KEYCLOAK Target Realm", "apic-demo")
+    env_vars["KEYCLOAK_CLIENT_ID"] = get_input_with_default("KEYCLOAK OIDC Client ID (APIC için)", "apic-client")
+    env_vars["KEYCLOAK_CLIENT_SECRET"] = get_input_with_default("KEYCLOAK OIDC Client Secret (boşsa Enter)", "", is_password=True)
     try:
         with open(ENV_FILE, "w") as f:
             f.write("#!/bin/bash\n")

@@ -262,5 +262,73 @@ def print_status():
     print()
 
 
+def write_status_report(filepath=None):
+    """
+    Migration durumunu okunabilir bir metin dosyasına yazar.
+    Her bölüm (SOURCE / TARGET / DURUM) alt alta gelir — terminal genişliğinden bağımsız.
+
+    filepath verilmezse 'migration_report.txt' kullanılır.
+    Dosya her çağrıda üzerine yazılır (son durum her zaman güncel).
+    """
+    if filepath is None:
+        filepath = "migration_report.txt"
+
+    rows = load_users()
+    from datetime import datetime as _dt
+    now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    lines = []
+    lines.append(f"Migration Durum Raporu — {now}")
+    lines.append(f"Toplam kayıt: {len(rows)}")
+    lines.append("")
+
+    done    = sum(1 for r in rows if r.get("migrated") == "true")
+    pending = len(rows) - done
+    lines.append(f"  Tamamlanan : {done}")
+    lines.append(f"  Bekleyen   : {pending}")
+    lines.append("")
+
+    # Sütun etiketleri ve CSV alan adları
+    col_defs = [
+        ("username",      "username"),
+        ("consumer_org",  "consumer_org"),
+        ("src_email",     "src_email"),
+        ("tgt_email",     "tgt_email"),
+        ("kc",            "kc_user_created"),
+        ("email_p",       "apic_email_parked"),
+        ("jit",           "apic_jit_done"),
+        ("xfrd",          "org_owner_xfrd"),
+        ("ok",            "migrated"),
+        ("migrated_at",   "migrated_at"),
+    ]
+
+    def _val(row, field):
+        v = row.get(field, "")
+        if v == "true":  return "Y"
+        if v == "false": return "-"
+        return v
+
+    widths = [
+        max(len(hdr), max((len(_val(r, fld)) for r in rows), default=0))
+        for hdr, fld in col_defs
+    ]
+
+    sep   = "  ".join("-" * w for w in widths)
+    hdr   = "  ".join(hdr.ljust(widths[i]) for i, (hdr, _) in enumerate(col_defs))
+    lines.append(hdr)
+    lines.append(sep)
+
+    for row in rows:
+        line = "  ".join(_val(row, fld).ljust(widths[i]) for i, (_, fld) in enumerate(col_defs))
+        lines.append(line)
+
+    lines.append("")
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return filepath
+
+
 if __name__ == "__main__":
     print_status()
