@@ -225,8 +225,8 @@ def main():
         print("==================================================")
         return
 
-    if csv_row.get("apic_provisioned", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{TARGET_USERNAME}' APIC'te zaten provision edilmiş (apic_provisioned=true). Atlanıyor.")
+    if csv_row.get("apic_jit_done", "false").lower() == "true":
+        print(f"--> [BİLGİ] '{TARGET_USERNAME}' APIC'te zaten JIT provision edilmiş (apic_jit_done=true). Atlanıyor.")
         print("==================================================")
         return
 
@@ -246,7 +246,7 @@ def main():
     if not success:
         sys.exit(1)
 
-    update_flag(TARGET_USERNAME, "apic_provisioned", True)
+    update_flag(TARGET_USERNAME, "apic_jit_done", True)
     mark_migrated(TARGET_USERNAME)
     clear_temp_password()
 

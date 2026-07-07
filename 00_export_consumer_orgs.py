@@ -29,13 +29,17 @@ CSV_FILE   = "migration_users.csv"
 PAGE_SIZE  = 50   # APIC'e gönderilen --limit değeri
 
 CSV_FIELDS = [
+    # SOURCE
     "username",
     "consumer_org",
-    "email_source",
-    "email_target",
-    "kc_created",
-    "email_updated",
-    "apic_provisioned",
+    "src_email",
+    # TARGET
+    "tgt_email",
+    "kc_user_created",
+    "apic_email_parked",
+    "apic_jit_done",
+    "org_owner_xfrd",
+    # DURUM
     "migrated",
     "migrated_at",
 ]
@@ -243,15 +247,16 @@ def main():
             continue
 
         row = {
-            "username":         username,
-            "consumer_org":     org_name,
-            "email_source":     email,
-            "email_target":     "",
-            "kc_created":       "false",
-            "email_updated":    "false",
-            "apic_provisioned": "false",
-            "migrated":         "false",
-            "migrated_at":      "",
+            "username":          username,
+            "consumer_org":      org_name,
+            "src_email":         email,
+            "tgt_email":         "",
+            "kc_user_created":   "false",
+            "apic_email_parked": "false",
+            "apic_jit_done":     "false",
+            "org_owner_xfrd":    "false",
+            "migrated":          "false",
+            "migrated_at":       "",
         }
         new_rows.append(row)
         added += 1

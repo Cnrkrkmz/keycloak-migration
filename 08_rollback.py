@@ -205,28 +205,28 @@ def rollback_user(csv_row):
     Herhangi bir adım başarısız olursa durur ve False döner.
     """
     username       = csv_row["username"]
-    original_email = csv_row["email_original"]
+    original_email = csv_row["src_email"]
 
     print(f"\n{'='*50}")
     print(f"  ROLLBACK: {username}")
     print(f"{'='*50}")
 
-    # R1: apic_provisioned → shadow user sil
-    if csv_row.get("apic_provisioned", "false").lower() == "true":
+    # R1: apic_jit_done → shadow user sil
+    if csv_row.get("apic_jit_done", "false").lower() == "true":
         print("--> [R1] APIC shadow user siliniyor...")
         if not rollback_apic_shadow_user(username):
             print(f"--> [DURDURULDU] '{username}' rollback R1'de başarısız oldu.")
             return False
 
-    # R2: email_updated → orijinal e-postaya dön
-    if csv_row.get("email_updated", "false").lower() == "true":
+    # R2: apic_email_parked → orijinal e-postaya dön
+    if csv_row.get("apic_email_parked", "false").lower() == "true":
         print("--> [R2] APIC e-postası orijinaline geri alınıyor...")
         if not rollback_apic_email(username, original_email):
             print(f"--> [DURDURULDU] '{username}' rollback R2'de başarısız oldu.")
             return False
 
-    # R3: kc_created → KC kullanıcısını sil
-    if csv_row.get("kc_created", "false").lower() == "true":
+    # R3: kc_user_created → KC kullanıcısını sil
+    if csv_row.get("kc_user_created", "false").lower() == "true":
         print("--> [R3] Keycloak kullanıcısı siliniyor...")
         if not rollback_kc_user(username):
             print(f"--> [DURDURULDU] '{username}' rollback R3'de başarısız oldu.")
@@ -258,7 +258,7 @@ def main():
         to_rollback = [
             u for u in pending
             if any(u.get(f, "false").lower() == "true"
-                   for f in ("kc_created", "email_updated", "apic_provisioned"))
+                   for f in ("kc_user_created", "apic_email_parked", "apic_jit_done", "org_owner_xfrd"))
         ]
 
         if not to_rollback:

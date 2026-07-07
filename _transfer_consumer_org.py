@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-from migration_state import get_user, update_flag
+from migration_state import get_user, update_flag, mark_migrated
 
 # ==============================================================================
 # APIC CONSUMER ORG SAHİPLİK DEVRİ
@@ -221,6 +221,9 @@ def main():
 
     if not transfer_ownership(consumer_org, member_url):
         sys.exit(1)
+
+    update_flag(TARGET_USERNAME, "org_owner_xfrd", True)
+    mark_migrated(TARGET_USERNAME)
 
     print("==================================================")
     print(f"[TAMAMLANDI] '{consumer_org}' sahipliği '{TARGET_USERNAME}' → Keycloak profiline devredildi.")

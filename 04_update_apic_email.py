@@ -88,8 +88,8 @@ def main():
         print(f"--> [HATA] '{TARGET_USERNAME}' CSV'de bulunamadı. Önce 03 scriptini çalıştırın.")
         sys.exit(1)
 
-    if csv_row.get("email_updated", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{TARGET_USERNAME}' e-posta zaten güncellendi (email_updated=true). Atlanıyor.")
+    if csv_row.get("apic_email_parked", "false").lower() == "true":
+        print(f"--> [BİLGİ] '{TARGET_USERNAME}' e-posta zaten güncellendi (apic_email_parked=true). Atlanıyor.")
         print("==================================================")
         return
 
@@ -125,7 +125,7 @@ def main():
         verify_data = get_current_user_data(TARGET_USERNAME)
         if verify_data and verify_data.get("email") == new_email:
             print("--> [BAŞARILI] E-posta değişimi APIC üzerinden %100 doğrulandı!")
-            update_flag(TARGET_USERNAME, "email_updated", True)
+            update_flag(TARGET_USERNAME, "apic_email_parked", True)
             update_email_target(TARGET_USERNAME, new_email)   # canlı CSV güncelleme
         else:
             print("--> [UYARI] Güncelleme komutu çalıştı ancak doğrulama başarısız oldu.")

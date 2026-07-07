@@ -49,6 +49,7 @@ if len(sys.argv) > 1:
 else:
     DEMO_USERNAME = input("Migrate edilecek APIC Kullanıcı Adı: ").strip()
 
+# Consumer Org bilgisi CSV'den gelir (add_user çağrısında); fallback olarak env'den okunur
 CONSUMER_ORG = os.environ.get("CONSUMER_ORG", "")
 
 # ------------------------------------------------------------------------------
@@ -194,10 +195,10 @@ def save_temp_password(username, temp_pass):
 
 
 def main():
-    # CSV kaydı yoksa oluştur; kc_created=true ise bu adım zaten geçilmiş demektir
+    # CSV kaydı yoksa oluştur; kc_user_created=true ise bu adım zaten geçilmiş demektir
     csv_row = get_user(DEMO_USERNAME)
-    if csv_row and csv_row.get("kc_created", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{DEMO_USERNAME}' zaten Keycloak'ta mevcut (kc_created=true). Atlanıyor.")
+    if csv_row and csv_row.get("kc_user_created", "false").lower() == "true":
+        print(f"--> [BİLGİ] '{DEMO_USERNAME}' zaten Keycloak'ta mevcut (kc_user_created=true). Atlanıyor.")
         print("==================================================")
         return
 
@@ -223,7 +224,7 @@ def main():
     print("--> [3/3] Keycloak'a yazılıyor...")
     temp_pass = create_kc_user(token, user_obj)
     if temp_pass:
-        update_flag(DEMO_USERNAME, "kc_created", True)
+        update_flag(DEMO_USERNAME, "kc_user_created", True)
         save_temp_password(user_obj.username, temp_pass)
 
     print("==================================================")

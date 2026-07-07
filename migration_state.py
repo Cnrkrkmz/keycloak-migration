@@ -2,20 +2,27 @@
 """
 migration_state.py — CSV tabanlı migration durum yöneticisi.
 
-Her consumer org için tek bir satır tutulur (1 org = 1 owner kullanıcısı).
-CSV dosyası hiçbir zaman sıfırlanmaz — her gün yeni kayıtlar eklenir,
-tamamlananlar migrated=true + migrated_at tarih damgasıyla arşivlenir.
+Her satır = 1 consumer org + o org'un owner kullanıcısı.
+CSV ikiye bölünmüş gibi okunabilir:
 
-CSV sütunları:
-  username          — APIC kaynak kullanıcı adı
-  consumer_org      — Kullanıcının ait olduğu Consumer Org
-  email_source      — Migrasyon öncesi orijinal e-posta (SOURCE, rollback için)
-  email_target      — Migrasyon sonrası -old suffix'li e-posta (TARGET, 04 yazar)
-  kc_created        — 03: Keycloak'ta kullanıcı yaratıldı mı?
-  email_updated     — 04: APIC'te e-posta -old suffix'iyle güncellendi mi?
-  apic_provisioned  — 05: APIC'te OIDC login tetiklendi / shadow user oluşturuldu mu?
-  migrated          — Tüm adımlar başarıyla tamamlandı mı?
-  migrated_at       — Tamamlanma tarihi/saati (YYYY-MM-DD HH:MM:SS), boş = henüz bitmedi
+  ── SOURCE (geçiş öncesi, APIC Local Registry) ──────────────────────
+  username          — APIC kullanıcı adı
+  consumer_org      — Kullanıcının sahibi olduğu Consumer Org
+  src_email         — Geçiş öncesi orijinal e-posta (rollback için saklanır)
+
+  ── TARGET (geçiş sonrası, Keycloak registry) ───────────────────────
+  tgt_email         — Geçiş için APIC'e yazılan -old suffix'li e-posta
+  kc_user_created   — [ADIM 1] Keycloak'ta kullanıcı oluşturuldu mu?
+  apic_email_parked — [ADIM 2] APIC Local Registry'de e-posta -old yapıldı mı?
+                       (Keycloak kullanıcısının orijinal adresle çakışmaması için)
+  apic_jit_done     — [ADIM 3] Keycloak token'ı APIC'e POST edildi mi?
+                       (APIC bu POST ile kendi içinde shadow user'ı JIT-provision eder;
+                        kullanıcı "otomatik giriş yapmış" sayılır ve APIC kaydı açılır)
+  org_owner_xfrd    — [ADIM 4] Consumer Org sahipliği Keycloak profiline devredildi mi?
+
+  ── DURUM ────────────────────────────────────────────────────────────
+  migrated          — Tüm 4 adım başarıyla tamamlandı mı?
+  migrated_at       — Tamamlanma zaman damgası (YYYY-MM-DD HH:MM:SS), boş = henüz bitmedi
 """
 
 import csv
@@ -25,17 +32,20 @@ from datetime import datetime
 CSV_FILE = "migration_users.csv"
 
 FIELDS = [
+    # SOURCE
     "username",
     "consumer_org",
-    "email_source",
-    "email_target",
-    "kc_created",
-    "email_updated",
-    "apic_provisioned",
+    "src_email",
+    # TARGET
+    "tgt_email",
+    "kc_user_created",
+    "apic_email_parked",
+    "apic_jit_done",
+    "org_owner_xfrd",
+    # DURUM
     "migrated",
     "migrated_at",
 ]
-
 
 # ------------------------------------------------------------------------------
 # OKUMA
@@ -74,7 +84,7 @@ def _write_all(rows):
         writer.writerows(rows)
 
 
-def add_user(username, consumer_org, email_source):
+def add_user(username, consumer_org, src_email):
     """
     Yeni bir kullanıcıyı CSV'ye ekler.
     Kullanıcı zaten varsa ekleme yapmaz, mevcut satırı döndürür.
@@ -86,26 +96,28 @@ def add_user(username, consumer_org, email_source):
             return row
 
     new_row = {
-        "username":         username,
-        "consumer_org":     consumer_org,
-        "email_source":     email_source,
-        "email_target":     "",
-        "kc_created":       "false",
-        "email_updated":    "false",
-        "apic_provisioned": "false",
-        "migrated":         "false",
-        "migrated_at":      "",
+        "username":          username,
+        "consumer_org":      consumer_org,
+        "src_email":         src_email,
+        "tgt_email":         "",
+        "kc_user_created":   "false",
+        "apic_email_parked": "false",
+        "apic_jit_done":     "false",
+        "org_owner_xfrd":    "false",
+        "migrated":          "false",
+        "migrated_at":       "",
     }
     rows.append(new_row)
     _write_all(rows)
-    print(f"--> [CSV] '{username}' kaydı oluşturuldu (source: {email_source}).")
+    print(f"--> [CSV] '{username}' kaydı oluşturuldu (src_email: {src_email}).")
     return new_row
 
 
 def update_flag(username, flag, value=True):
     """
-    Belirli bir flag'i (kc_created, email_updated, apic_provisioned, migrated)
-    günceller.
+    Belirli bir flag'i günceller.
+    Kabul edilen flag'ler: kc_user_created, apic_email_parked,
+                           apic_jit_done, org_owner_xfrd, migrated
     """
     if flag not in FIELDS:
         raise ValueError(f"Geçersiz flag: '{flag}'. Geçerli değerler: {FIELDS}")
@@ -125,46 +137,48 @@ def update_flag(username, flag, value=True):
     _write_all(rows)
 
 
-def update_email_target(username, email_target):
+def update_email_target(username, tgt_email):
     """
-    Migration sırasında -old suffix'iyle oluşturulan hedef e-postayı
-    canlı olarak CSV'ye yazar (04_update_apic_email.py çağırır).
+    -old suffix'iyle oluşturulan hedef e-postayı CSV'ye yazar
+    (04_update_apic_email.py çağırır).
     """
     rows = load_users()
     for row in rows:
         if row["username"] == username:
-            row["email_target"] = email_target
+            row["tgt_email"] = tgt_email
             break
     _write_all(rows)
-    print(f"--> [CSV] '{username}' email_target güncellendi → {email_target}")
+    print(f"--> [CSV] '{username}' tgt_email güncellendi → {tgt_email}")
 
 
 def mark_migrated(username):
-    """Tüm adımlar tamamlandığında kullanıcıyı migrated=true + tarih damgası yapar."""
+    """Tüm adımlar tamamlandığında kullanıcıyı migrated=true + zaman damgası yapar."""
     rows = load_users()
     for row in rows:
         if row["username"] == username:
             row["migrated"]    = "true"
             row["migrated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            break
-    _write_all(rows)
-    print(f"--> [CSV] '{username}' → migrated=true [{row['migrated_at']}]")
+            _write_all(rows)
+            print(f"--> [CSV] '{username}' → migrated=true [{row['migrated_at']}]")
+            return
+    print(f"--> [UYARI] CSV'de '{username}' bulunamadı, migrated işaretlenemedi.")
 
 
 def mark_rollback(username):
     """
-    Rollback tamamlandığında tüm flag ve email_target'ı sıfırlar.
-    Kullanıcı CSV'de kalır — tekrar deneme için.
+    Rollback tamamlandığında tüm flag ve tgt_email'i sıfırlar.
+    src_email korunur — tekrar deneme için.
     """
     rows = load_users()
     for row in rows:
         if row["username"] == username:
-            row["email_target"]     = ""
-            row["kc_created"]       = "false"
-            row["email_updated"]    = "false"
-            row["apic_provisioned"] = "false"
-            row["migrated"]         = "false"
-            row["migrated_at"]      = ""
+            row["tgt_email"]         = ""
+            row["kc_user_created"]   = "false"
+            row["apic_email_parked"] = "false"
+            row["apic_jit_done"]     = "false"
+            row["org_owner_xfrd"]    = "false"
+            row["migrated"]          = "false"
+            row["migrated_at"]       = ""
             break
     _write_all(rows)
     print(f"--> [CSV] '{username}' rollback tamamlandı, tüm flag'ler sıfırlandı.")
@@ -175,19 +189,43 @@ def mark_rollback(username):
 # ------------------------------------------------------------------------------
 
 def print_status():
-    """Tüm kullanıcıların migration durumunu tablo olarak ekrana basar."""
+    """
+    Tüm kullanıcıların migration durumunu SOURCE | TARGET formatında
+    tablo olarak ekrana basar.
+    """
     rows = load_users()
     if not rows:
         print(f"--> [BİLGİ] '{CSV_FILE}' boş veya mevcut değil.")
         return
 
-    col_w = [max(len(f), max((len(r.get(f, "")) for r in rows), default=0)) for f in FIELDS]
-    header = "  ".join(f.ljust(col_w[i]) for i, f in enumerate(FIELDS))
-    sep    = "  ".join("-" * w for w in col_w)
-    print("\n" + header)
-    print(sep)
+    # Sütun grupları
+    src_fields = ["username", "consumer_org", "src_email"]
+    tgt_fields = ["tgt_email", "kc_user_created", "apic_email_parked",
+                  "apic_jit_done", "org_owner_xfrd", "migrated", "migrated_at"]
+
+    def col_w(fields):
+        return [max(len(f), max((len(r.get(f, "")) for r in rows), default=0))
+                for f in fields]
+
+    sw = col_w(src_fields)
+    tw = col_w(tgt_fields)
+
+    src_w_total = sum(sw) + 2 * (len(sw) - 1)
+    tgt_w_total = sum(tw) + 2 * (len(tw) - 1)
+
+    src_hdr = "  ".join(f.ljust(sw[i]) for i, f in enumerate(src_fields))
+    tgt_hdr = "  ".join(f.ljust(tw[i]) for i, f in enumerate(tgt_fields))
+    sep_line = "─" * (src_w_total + 4 + tgt_w_total)
+
+    print()
+    print(f"{'── SOURCE ':─<{src_w_total + 2}}  {'── TARGET ':─<{tgt_w_total}}")
+    print(f"{src_hdr}  │  {tgt_hdr}")
+    print(sep_line)
+
     for row in rows:
-        print("  ".join(row.get(f, "").ljust(col_w[i]) for i, f in enumerate(FIELDS)))
+        src_part = "  ".join(row.get(f, "").ljust(sw[i]) for i, f in enumerate(src_fields))
+        tgt_part = "  ".join(row.get(f, "").ljust(tw[i]) for i, f in enumerate(tgt_fields))
+        print(f"{src_part}  │  {tgt_part}")
     print()
 
 
