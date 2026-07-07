@@ -98,8 +98,8 @@ def rollback_apic_shadow_user(username):
 # ADIM R2 — APIC e-postasını orijinaline geri al (email_updated geri al)
 # ------------------------------------------------------------------------------
 
-def rollback_apic_email(username, original_email):
-    """APIC Local Registry'de e-postayı orijinal değere geri yazar."""
+def rollback_apic_email(username, target_email):
+    """APIC Local Registry'de e-postayı hedef değere geri yazar."""
     # Mevcut first_name/last_name'i almaya çalış — başarısız olursa boş bırak,
     # users:update email-only güncellemeyi kabul eder.
     cmd_get = [
@@ -121,7 +121,7 @@ def rollback_apic_email(username, original_email):
     except Exception as e:
         print(f"--> [UYARI] Kullanıcı detayı alınamadı, güncelleme yine de denenecek: {e}")
 
-    yaml_content = f"""email: {original_email}
+    yaml_content = f"""email: {target_email}
 title: {username}
 """
     if first_name:
@@ -136,7 +136,7 @@ title: {username}
     ]
     try:
         subprocess.run(cmd_upd, input=yaml_content, capture_output=True, text=True, check=True)
-        print(f"--> [ROLLBACK] APIC e-postası '{original_email}' olarak geri alındı.")
+        print(f"--> [ROLLBACK] APIC e-postası '{target_email}' olarak geri alındı.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"--> [HATA] E-posta geri alınamadı: {e.stderr.strip() or e.stdout.strip()}")
@@ -238,11 +238,11 @@ def detect_apic_email_parked(username):
         return None, None
 
 
-def derive_original_email(parked_email):
-    """'-old@' suffix'ini kaldırarak orijinal e-postayı hesaplar."""
-    if parked_email and "-old@" in parked_email:
-        return parked_email.replace("-old@", "@")
-    return parked_email
+def derive_target_email(source_email):
+    """'-old@' suffix'ini kaldırarak hedef e-postayı hesaplar."""
+    if source_email and "-old@" in source_email:
+        return source_email.replace("-old@", "@")
+    return source_email
 
 
 # ------------------------------------------------------------------------------
@@ -257,8 +257,8 @@ def rollback_user(csv_row, force=False):
     force=True: CSV flag'lerine bakmadan APIC ve KC'ye bakarak gerçek
                 durumu tespit eder. CSV'nin eski/eksik olduğu durumlarda kullan.
     """
-    username       = csv_row["username"]
-    original_email = csv_row.get("original_email", "")
+    username     = csv_row["username"]
+    target_email = csv_row.get("target_email", "")
 
     print(f"\n{'='*50}")
     print(f"  ROLLBACK: {username}{'  [FORCE]' if force else ''}")
@@ -270,11 +270,11 @@ def rollback_user(csv_row, force=False):
         kc_exists = bool(_get_kc_uuid(username))
         do_r2 = (parked is True)
         do_r3 = kc_exists
-        # original_email: CSV'de -old@ ile yazılmışsa gerçek e-postayı hesapla
-        if not original_email or "-old@" in original_email:
-            original_email = derive_original_email(current_email or original_email)
+        # target_email: CSV'de -old@ ile yazılmışsa gerçek e-postayı hesapla
+        if not target_email or "-old@" in target_email:
+            target_email = derive_target_email(current_email or target_email)
         print(f"--> [FORCE] APIC e-posta parked={parked}  KC exists={kc_exists}")
-        print(f"--> [FORCE] Geri alınacak orijinal e-posta: {original_email}")
+        print(f"--> [FORCE] Geri alınacak hedef e-posta: {target_email}")
     else:
         do_r2 = csv_row.get("apic_email_parked", "false").lower() == "true"
         do_r3 = csv_row.get("kc_user_created",   "false").lower() == "true"
@@ -286,10 +286,10 @@ def rollback_user(csv_row, force=False):
             print(f"--> [DURDURULDU] '{username}' rollback R1'de başarısız oldu.")
             return False
 
-    # R2: apic_email_parked → orijinal e-postaya dön
+    # R2: apic_email_parked → hedef e-postaya dön
     if do_r2:
-        print(f"--> [R2] APIC e-postası '{original_email}' olarak geri alınıyor...")
-        if not rollback_apic_email(username, original_email):
+        print(f"--> [R2] APIC e-postası '{target_email}' olarak geri alınıyor...")
+        if not rollback_apic_email(username, target_email):
             print(f"--> [DURDURULDU] '{username}' rollback R2'de başarısız oldu.")
             return False
 
@@ -325,7 +325,7 @@ def main():
         if not csv_row:
             # --force ile CSV'de olmayan kullanıcı da rollback edilebilir
             if args.force:
-                csv_row = {"username": args.username, "original_email": ""}
+                csv_row = {"username": args.username, "target_email": ""}
             else:
                 print(f"--> [HATA] '{args.username}' CSV'de bulunamadı.")
                 sys.exit(1)

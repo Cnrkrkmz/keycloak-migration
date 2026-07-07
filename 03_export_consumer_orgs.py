@@ -32,9 +32,9 @@ CSV_FIELDS = [
     # SOURCE — APIC Local Registry (eski sistem)
     "username",
     "consumer_org",
-    "parked_email",
+    "source_email",
     # TARGET — Keycloak (yeni sistem)
-    "original_email",
+    "target_email",
     "kc_user_created",
     "apic_email_parked",
     "apic_jit_done",
@@ -249,8 +249,8 @@ def main():
         row = {
             "username":          username,
             "consumer_org":      org_name,
-            "parked_email":      "",
-            "original_email":    email,
+            "source_email":      "",
+            "target_email":      email,
             "kc_user_created":   "false",
             "apic_email_parked": "false",
             "apic_jit_done":     "false",

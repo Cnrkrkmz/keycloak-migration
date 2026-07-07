@@ -62,8 +62,8 @@ TARGET_REALM       = os.environ.get("KEYCLOAK_REALM_NAME", "apic-demo")
 KEYCLOAK_CLIENT_ID     = os.environ.get("KEYCLOAK_CLIENT_ID", "apic-client")
 KEYCLOAK_CLIENT_SECRET = os.environ.get("KEYCLOAK_CLIENT_SECRET", "")
 
-# 03_migrate_user_to_keycloak.py tarafından kaydedilen geçici şifre
-KC_TEMP_PASSWORD = os.environ.get("KC_TEMP_PASSWORD", "")
+# KC_TEMP_PASSWORD burada okunmuyor — step_01 her kullanıcı için dosyayı günceller,
+# subprocess olarak çalıştığımızda load_env() sonrası main() içinde okunmalı.
 
 if len(sys.argv) > 1:
     TARGET_USERNAME = sys.argv[1]
@@ -237,13 +237,18 @@ def main():
         print("==================================================")
         return
 
-    if not KC_TEMP_PASSWORD:
+    # load_env() modül yüklenirken çalıştı; step_01 şifreyi dosyaya yazdıktan
+    # sonra bu subprocess başlatıldığı için burada tekrar okuyoruz.
+    load_env()
+    kc_temp_password = os.environ.get("KC_TEMP_PASSWORD", "")
+
+    if not kc_temp_password:
         print("--> [HATA] 'KC_TEMP_PASSWORD' bulunamadı!")
-        print("--> Lütfen önce 03_migrate_user_to_keycloak.py scriptini çalıştırın.")
+        print("--> step_01_create_kc_user.py başarıyla tamamlanmış olmalı.")
         sys.exit(1)
 
     print(f"\n--> [1/2] '{TARGET_USERNAME}' kullanıcısı adına Keycloak'tan OIDC token alınıyor...")
-    kc_user_token = get_kc_user_token(TARGET_USERNAME, KC_TEMP_PASSWORD)
+    kc_user_token = get_kc_user_token(TARGET_USERNAME, kc_temp_password)
     if not kc_user_token:
         sys.exit(1)
 

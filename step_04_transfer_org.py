@@ -61,10 +61,10 @@ def get_consumer_org_for_user(username):
     return ""
 
 
-def get_original_email(username):
+def get_target_email(username):
     """
     APIC Local Registry'den kullanıcının mevcut e-postasını okur.
-    -old suffix'i varsa çıkarıp orijinal e-postayı döndürür.
+    -old suffix'i varsa çıkarıp hedef e-postayı döndürür.
     """
     cmd = [
         "apic", "users:get", username,
@@ -196,8 +196,8 @@ def main():
         print(f"--> [HATA] CSV'de '{TARGET_USERNAME}' için consumer_org bilgisi yok.")
         sys.exit(1)
 
-    print(f"\n--> [1/4] '{TARGET_USERNAME}' için orijinal e-posta hesaplanıyor...")
-    expected_email = get_original_email(TARGET_USERNAME)
+    print(f"\n--> [1/4] '{TARGET_USERNAME}' için hedef e-posta hesaplanıyor...")
+    expected_email = get_target_email(TARGET_USERNAME)
     if not expected_email:
         sys.exit(1)
     print(f"--> [BİLGİ] Hedef e-posta: {expected_email}")
