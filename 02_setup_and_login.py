@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.11
 import os
 import subprocess
 import getpass
@@ -33,7 +33,6 @@ def setup_environment():
     env_vars["PROV_ORG"] = get_input_with_default("Provider Organization", "caner-script-provider")
     env_vars["CATALOG"] = get_input_with_default("Catalog", "sandbox")
     env_vars["LOCAL_REGISTRY"] = get_input_with_default("Local Registry", "sandbox-catalog")
-    env_vars["CONSUMER_ORG"] = get_input_with_default("Consumer Org", "caner-script-consumer")
     env_vars["ROOT_DIR"] = get_input_with_default("Root Directory", "/home/admin/caner-script-deneme")
 
     print("\n--- APIC Kimlik ve Client Bilgileri ---")
@@ -50,7 +49,7 @@ def setup_environment():
     try:
         with open(ENV_FILE, "w") as f:
             f.write("#!/bin/bash\n")
-            f.write("# Bu dosya 01_setup_and_login.py scripti tarafından otomatik oluşturulmuştur.\n\n")
+            f.write("# Bu dosya 02_setup_and_login.py scripti tarafından otomatik oluşturulmuştur.\n\n")
             for key, value in env_vars.items():
                 f.write(f'export {key}="{value}"\n')
                 os.environ[key] = value
