@@ -126,31 +126,15 @@ def fetch_all_consumer_orgs(server, prov_org, catalog, page_size):
     return all_orgs
 
 
-def fetch_owner_info(server, prov_org, catalog, consumer_org_name):
+def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
     """
-    Bir consumer org'un owner kullanıcısını çeker.
-    APIC, consumer-orgs:get yanıtında owner_url alanı verir; bu URL'den kullanıcı
-    bilgisi alınır.
+    Bir consumer org'un owner kullanıcısını members:list ile çeker.
+    owner_url, consumer-orgs:list yanıtından gelen değerdir — eşleştirme
+    için kullanılır.
     Returns: {"username": ..., "email": ...} veya None
     """
-    # 1. Consumer org detayını al → owner_url
-    cmd_org = [
-        "apic", "consumer-orgs:get", consumer_org_name,
-        "-s", server, "-o", prov_org, "-c", catalog,
-        "--format", "json", "--output", "-",
-    ]
-    org_data = _apic_run(cmd_org)
-    if not org_data:
-        return None
-
-    owner_url = org_data.get("owner_url", "")
-    if not owner_url:
-        print(f"--> [UYARI] '{consumer_org_name}' için owner_url boş.")
-        return None
-
-    # 2. owner_url'den username ve email çek (members:list içinden owner'ı bul)
     cmd_members = [
-        "apic", "members:list",
+        "apic", "members:list", "--scope", "consumer-org",
         "-s", server, "-o", prov_org, "-c", catalog,
         "--consumer-org", consumer_org_name,
         "--format", "json", "--output", "-",
@@ -159,13 +143,17 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name):
     if not members_data:
         return None
 
-    for member in members_data.get("results", []):
+    items = members_data.get("results", [])
+    # Önce owner_url ile tam eşleştir, bulamazsan role=owner'ı dene
+    for member in items:
         user = member.get("user", {})
-        if user.get("url") == owner_url or member.get("role", "") == "owner":
-            return {
-                "username": user.get("username", ""),
-                "email":    user.get("email", ""),
-            }
+        if owner_url and user.get("url") == owner_url:
+            return {"username": user.get("username", ""), "email": user.get("email", "")}
+
+    for member in items:
+        user = member.get("user", {})
+        if member.get("role", "") == "owner":
+            return {"username": user.get("username", ""), "email": user.get("email", "")}
 
     print(f"--> [UYARI] '{consumer_org_name}' için owner üye bulunamadı.")
     return None
@@ -234,11 +222,12 @@ def main():
     print(f"\n--> [BİLGİ] {len(orgs)} org için owner bilgisi alınıyor...\n")
 
     for org in orgs:
-        org_name = org.get("name", "")
+        org_name  = org.get("name", "")
+        owner_url = org.get("owner_url", "")
         if not org_name:
             continue
 
-        owner = fetch_owner_info(server, prov_org, catalog, org_name)
+        owner = fetch_owner_info(server, prov_org, catalog, org_name, owner_url)
         if not owner or not owner["username"]:
             print(f"--> [UYARI] '{org_name}' owner'ı alınamadı, atlanıyor.")
             failed += 1
