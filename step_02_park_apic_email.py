@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-from migration_state import get_user, update_flag, update_email_target
+from migration_state import get_user, update_flag, update_parked_email
 
 # ==============================================================================
 # step_02_park_apic_email.py — APIC e-postasını -old suffix ile park et
@@ -122,7 +122,7 @@ def main():
         if verify_data and verify_data.get("email") == new_email:
             print("--> [BAŞARILI] E-posta değişimi APIC üzerinden %100 doğrulandı!")
             update_flag(TARGET_USERNAME, "apic_email_parked", True)
-            update_email_target(TARGET_USERNAME, new_email)   # canlı CSV güncelleme
+            update_parked_email(TARGET_USERNAME, new_email)   # canlı CSV güncelleme
         else:
             print("--> [UYARI] Güncelleme komutu çalıştı ancak doğrulama başarısız oldu.")
 

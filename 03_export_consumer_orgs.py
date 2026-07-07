@@ -29,12 +29,12 @@ CSV_FILE   = "migration_users.csv"
 PAGE_SIZE  = 50   # APIC'e gönderilen --limit değeri
 
 CSV_FIELDS = [
-    # SOURCE
+    # SOURCE — APIC Local Registry (eski sistem)
     "username",
     "consumer_org",
-    "src_email",
-    # TARGET
-    "tgt_email",
+    "parked_email",
+    # TARGET — Keycloak (yeni sistem)
+    "original_email",
     "kc_user_created",
     "apic_email_parked",
     "apic_jit_done",
@@ -249,8 +249,8 @@ def main():
         row = {
             "username":          username,
             "consumer_org":      org_name,
-            "src_email":         email,
-            "tgt_email":         "",
+            "parked_email":      "",
+            "original_email":    email,
             "kc_user_created":   "false",
             "apic_email_parked": "false",
             "apic_jit_done":     "false",

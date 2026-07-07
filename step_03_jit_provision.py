@@ -2,9 +2,16 @@
 import json
 import os
 import sys
+import ssl
 import urllib.request
 import urllib.parse
 import urllib.error
+
+# Self-signed sertifika ortamlarında SSL doğrulamasını devre dışı bırak.
+# (Test/lab ortamı — üretimde CA-signed sertifika kullanılmalı)
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 from migration_state import get_user, update_flag, mark_migrated
 
@@ -77,7 +84,7 @@ def _http(url, *, data=None, method=None, headers=None):
     if headers:
         for k, v in headers.items():
             req.add_header(k, v)
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
         body = resp.read().decode()
         try:
             return resp.status, json.loads(body)

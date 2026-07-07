@@ -3,10 +3,15 @@ import subprocess
 import json
 import os
 import sys
+import ssl
 import urllib.request
 import urllib.parse
 import secrets
 import string
+
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 from migration_state import get_user, add_user, update_flag
 # add_user imzası: add_user(username, consumer_org, email_source)
@@ -121,7 +126,7 @@ def get_kc_token():
 
     req = urllib.request.Request(url, data=data)
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as response:
             res_data = json.loads(response.read().decode())
             return res_data.get("access_token")
     except Exception as e:
@@ -154,7 +159,7 @@ def create_kc_user(token, user_obj):
     req.add_header("Content-Type", "application/json")
 
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as response:
             if response.status == 201:
                 print(f"--> [BAŞARILI] '{user_obj.username}' Keycloak'ta yaratıldı.")
                 return temp_pass

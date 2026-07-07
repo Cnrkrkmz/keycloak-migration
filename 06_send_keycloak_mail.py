@@ -2,9 +2,14 @@
 import json
 import os
 import sys
+import ssl
 import urllib.request
 import urllib.parse
 import urllib.error
+
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # ==============================================================================
 # KEYCLOAK UPDATE_PASSWORD MAİL GÖNDERİCİ
@@ -70,7 +75,7 @@ def get_admin_token():
     }).encode("utf-8")
     try:
         req = urllib.request.Request(url, data=data)
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode()).get("access_token")
     except Exception as e:
         print(f"--> [HATA] Admin token alınamadı: {e}")
@@ -83,7 +88,7 @@ def get_user_id(token, username):
     try:
         req = urllib.request.Request(url)
         req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             users = json.loads(resp.read().decode())
             if users:
                 return users[0]["id"]
@@ -105,7 +110,7 @@ def send_update_password_email(token, user_id):
         req = urllib.request.Request(url, data=payload, method="PUT")
         req.add_header("Authorization", f"Bearer {token}")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             if resp.status in (200, 204):
                 return True
         return False

@@ -3,21 +3,22 @@
 migration_state.py — CSV tabanlı migration durum yöneticisi.
 
 Her satır = 1 consumer org + o org'un owner kullanıcısı.
-CSV ikiye bölünmüş gibi okunabilir:
 
-  ── SOURCE (geçiş öncesi, APIC Local Registry) ──────────────────────
+  ── SOURCE (APIC Local Registry — eski sistem) ───────────────────────
   username          — APIC kullanıcı adı
   consumer_org      — Kullanıcının sahibi olduğu Consumer Org
-  src_email         — Geçiş öncesi orijinal e-posta (rollback için saklanır)
+  parked_email      — Migration süresince APIC'e yazılan geçici -old@
+                      e-posta. Keycloak kullanıcısıyla çakışmayı önler.
+                      Rollback'te bu kaldırılır, original_email geri yazılır.
 
-  ── TARGET (geçiş sonrası, Keycloak registry) ───────────────────────
-  tgt_email         — Geçiş için APIC'e yazılan -old suffix'li e-posta
+  ── TARGET (Keycloak — yeni sistem) ──────────────────────────────────
+  original_email    — Kullanıcının gerçek e-postası. Keycloak'a bu yazılır.
+                      Migration öncesi APIC'te de bu vardı; sonunda Consumer
+                      Org owner'ı olarak Keycloak'taki bu profil kalır.
   kc_user_created   — [ADIM 1] Keycloak'ta kullanıcı oluşturuldu mu?
-  apic_email_parked — [ADIM 2] APIC Local Registry'de e-posta -old yapıldı mı?
-                       (Keycloak kullanıcısının orijinal adresle çakışmaması için)
+  apic_email_parked — [ADIM 2] APIC'te e-posta -old@ yapıldı mı?
   apic_jit_done     — [ADIM 3] Keycloak token'ı APIC'e POST edildi mi?
-                       (APIC bu POST ile kendi içinde shadow user'ı JIT-provision eder;
-                        kullanıcı "otomatik giriş yapmış" sayılır ve APIC kaydı açılır)
+                       (APIC bu POST ile kendi içinde shadow user'ı JIT-provision eder)
   org_owner_xfrd    — [ADIM 4] Consumer Org sahipliği Keycloak profiline devredildi mi?
 
   ── DURUM ────────────────────────────────────────────────────────────
@@ -32,12 +33,12 @@ from datetime import datetime
 CSV_FILE = "migration_users.csv"
 
 FIELDS = [
-    # SOURCE
+    # SOURCE — APIC Local Registry (eski sistem)
     "username",
     "consumer_org",
-    "src_email",
-    # TARGET
-    "tgt_email",
+    "parked_email",
+    # TARGET — Keycloak (yeni sistem)
+    "original_email",
     "kc_user_created",
     "apic_email_parked",
     "apic_jit_done",
@@ -84,7 +85,7 @@ def _write_all(rows):
         writer.writerows(rows)
 
 
-def add_user(username, consumer_org, src_email):
+def add_user(username, consumer_org, original_email):
     """
     Yeni bir kullanıcıyı CSV'ye ekler.
     Kullanıcı zaten varsa ekleme yapmaz, mevcut satırı döndürür.
@@ -98,8 +99,8 @@ def add_user(username, consumer_org, src_email):
     new_row = {
         "username":          username,
         "consumer_org":      consumer_org,
-        "src_email":         src_email,
-        "tgt_email":         "",
+        "parked_email":      "",
+        "original_email":    original_email,
         "kc_user_created":   "false",
         "apic_email_parked": "false",
         "apic_jit_done":     "false",
@@ -109,7 +110,7 @@ def add_user(username, consumer_org, src_email):
     }
     rows.append(new_row)
     _write_all(rows)
-    print(f"--> [CSV] '{username}' kaydı oluşturuldu (src_email: {src_email}).")
+    print(f"--> [CSV] '{username}' kaydı oluşturuldu (original_email: {original_email}).")
     return new_row
 
 
@@ -137,18 +138,18 @@ def update_flag(username, flag, value=True):
     _write_all(rows)
 
 
-def update_email_target(username, tgt_email):
+def update_parked_email(username, parked_email):
     """
-    -old suffix'iyle oluşturulan hedef e-postayı CSV'ye yazar
-    (04_update_apic_email.py çağırır).
+    APIC'e yazılan -old@ park e-postasını CSV'ye yazar
+    (step_02_park_apic_email.py çağırır).
     """
     rows = load_users()
     for row in rows:
         if row["username"] == username:
-            row["tgt_email"] = tgt_email
+            row["parked_email"] = parked_email
             break
     _write_all(rows)
-    print(f"--> [CSV] '{username}' tgt_email güncellendi → {tgt_email}")
+    print(f"--> [CSV] '{username}' parked_email güncellendi → {parked_email}")
 
 
 def mark_migrated(username):
@@ -166,13 +167,13 @@ def mark_migrated(username):
 
 def mark_rollback(username):
     """
-    Rollback tamamlandığında tüm flag ve tgt_email'i sıfırlar.
-    src_email korunur — tekrar deneme için.
+    Rollback tamamlandığında tüm flag ve parked_email'i sıfırlar.
+    original_email korunur — tekrar deneme için.
     """
     rows = load_users()
     for row in rows:
         if row["username"] == username:
-            row["tgt_email"]         = ""
+            row["parked_email"]      = ""
             row["kc_user_created"]   = "false"
             row["apic_email_parked"] = "false"
             row["apic_jit_done"]     = "false"
@@ -194,8 +195,8 @@ def print_status():
     tablo olarak ekrana basar.
 
     Gösterim:
-      SOURCE  : username  consumer_org  src_email
-      TARGET  : tgt_email  kc  email  jit  xfrd
+      SOURCE  : username  consumer_org  parked_email
+      TARGET  : original_email  kc  email_p  jit  xfrd
       DURUM   : migrated  migrated_at
     Flag değerleri okunabilirlik için kısaltılır: true→Y  false→-
     """
@@ -206,16 +207,16 @@ def print_status():
 
     # Sütun tanımları  (başlık_kısa, alan_adı)
     src_cols = [
-        ("username",     "username"),
-        ("consumer_org", "consumer_org"),
-        ("src_email",    "src_email"),
+        ("username",      "username"),
+        ("consumer_org",  "consumer_org"),
+        ("parked_email",  "parked_email"),
     ]
     tgt_cols = [
-        ("tgt_email",    "tgt_email"),
-        ("kc",           "kc_user_created"),
-        ("email_p",      "apic_email_parked"),
-        ("jit",          "apic_jit_done"),
-        ("xfrd",         "org_owner_xfrd"),
+        ("original_email", "original_email"),
+        ("kc",             "kc_user_created"),
+        ("email_p",        "apic_email_parked"),
+        ("jit",            "apic_jit_done"),
+        ("xfrd",           "org_owner_xfrd"),
     ]
     st_cols = [
         ("ok",           "migrated"),
@@ -290,16 +291,16 @@ def write_status_report(filepath=None):
 
     # Sütun etiketleri ve CSV alan adları
     col_defs = [
-        ("username",      "username"),
-        ("consumer_org",  "consumer_org"),
-        ("src_email",     "src_email"),
-        ("tgt_email",     "tgt_email"),
-        ("kc",            "kc_user_created"),
-        ("email_p",       "apic_email_parked"),
-        ("jit",           "apic_jit_done"),
-        ("xfrd",          "org_owner_xfrd"),
-        ("ok",            "migrated"),
-        ("migrated_at",   "migrated_at"),
+        ("username",       "username"),
+        ("consumer_org",   "consumer_org"),
+        ("parked_email",   "parked_email"),
+        ("original_email", "original_email"),
+        ("kc",             "kc_user_created"),
+        ("email_p",        "apic_email_parked"),
+        ("jit",            "apic_jit_done"),
+        ("xfrd",           "org_owner_xfrd"),
+        ("ok",             "migrated"),
+        ("migrated_at",    "migrated_at"),
     ]
 
     def _val(row, field):

@@ -3,10 +3,15 @@ import subprocess
 import json
 import os
 import sys
+import ssl
 import argparse
 import urllib.request
 import urllib.parse
 import urllib.error
+
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 from migration_state import get_user, get_pending_users, mark_rollback
 
@@ -152,7 +157,7 @@ def _get_kc_admin_token():
     }).encode("utf-8")
     try:
         req = urllib.request.Request(url, data=data)
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode()).get("access_token")
     except Exception as e:
         print(f"--> [HATA] KC admin token alınamadı: {e}")
@@ -168,7 +173,7 @@ def _get_kc_uuid(username):
     try:
         req = urllib.request.Request(url)
         req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             users = json.loads(resp.read().decode())
             return users[0]["id"] if users else None
     except Exception as e:
@@ -191,7 +196,7 @@ def rollback_kc_user(username):
     try:
         req = urllib.request.Request(url, method="DELETE")
         req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             if resp.status in (200, 204):
                 print(f"--> [ROLLBACK] Keycloak kullanıcısı '{username}' silindi.")
                 return True
@@ -253,7 +258,7 @@ def rollback_user(csv_row, force=False):
                 durumu tespit eder. CSV'nin eski/eksik olduğu durumlarda kullan.
     """
     username       = csv_row["username"]
-    original_email = csv_row.get("src_email", "")
+    original_email = csv_row.get("original_email", "")
 
     print(f"\n{'='*50}")
     print(f"  ROLLBACK: {username}{'  [FORCE]' if force else ''}")
@@ -320,7 +325,7 @@ def main():
         if not csv_row:
             # --force ile CSV'de olmayan kullanıcı da rollback edilebilir
             if args.force:
-                csv_row = {"username": args.username, "src_email": ""}
+                csv_row = {"username": args.username, "original_email": ""}
             else:
                 print(f"--> [HATA] '{args.username}' CSV'de bulunamadı.")
                 sys.exit(1)
