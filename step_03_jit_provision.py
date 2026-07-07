@@ -168,7 +168,10 @@ def trigger_apic_oidc_login(kc_user_token):
         status, body = _http(
             url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
         )
         if status == 200:
             print("--> [BAŞARILI] APIC OIDC login tetiklendi. Gölge kullanıcı JIT-provision edildi.")
