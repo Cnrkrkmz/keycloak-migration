@@ -147,14 +147,26 @@ def trigger_apic_oidc_login(kc_user_token):
     creds_file = os.environ.get("APIC_CLIENT_CREDS", "")
     apic_client_id     = ""
     apic_client_secret = ""
+    
     if creds_file and os.path.exists(creds_file):
         try:
             with open(creds_file) as f:
                 creds = json.load(f)
-            apic_client_id     = creds.get("client_id", "")
-            apic_client_secret = creds.get("client_secret", "")
-        except Exception:
-            pass  # non-fatal; APIC may not require them for token exchange
+            
+            # Hem snake_case hem camelCase destekle
+            apic_client_id     = creds.get("client_id") or creds.get("clientId", "")
+            apic_client_secret = creds.get("client_secret") or creds.get("clientSecret", "")
+        except Exception as e:
+            print(f"--> [UYARI] Kimlik dosyası okunamadı: {e}")
+
+    # Değerler hala boşsa süreci durdur ve dosya içeriğini ekrana bas
+    if not apic_client_id or not apic_client_secret:
+        print(f"--> [HATA] '{creds_file}' içinden client_id veya client_secret okunamadı!")
+        try:
+            print(f"--> Okunan JSON içeriği: {creds}")
+        except:
+            pass
+        return False
 
     payload = json.dumps({
         "realm":        f"provider/{KEYCLOAK_REGISTRY}",
