@@ -152,10 +152,12 @@ def trigger_apic_oidc_login(kc_user_token):
         try:
             with open(creds_file) as f:
                 creds = json.load(f)
-            
-            # Hem snake_case hem camelCase destekle
-            apic_client_id     = creds.get("client_id") or creds.get("clientId", "")
-            apic_client_secret = creds.get("client_secret") or creds.get("clientSecret", "")
+
+            # Önce 'toolkit' alt objesine bak, yoksa üst seviyeden oku
+            toolkit_creds = creds.get("toolkit", {})
+
+            apic_client_id     = toolkit_creds.get("client_id") or creds.get("client_id", "")
+            apic_client_secret = toolkit_creds.get("client_secret") or creds.get("client_secret", "")
         except Exception as e:
             print(f"--> [UYARI] Kimlik dosyası okunamadı: {e}")
 
