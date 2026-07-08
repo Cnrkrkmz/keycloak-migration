@@ -17,18 +17,20 @@ Batch içinde bir kullanıcı başarısız olursa o kullanıcı atlanır
 (migrated=false kalır) ve bir sonrakiyle devam edilir.
 
 Kullanım:
-  python 04_run_migration.py                          # tüm pending kullanıcılar
-  python 04_run_migration.py --batch-size 5           # özel batch boyutu
-  python 04_run_migration.py --limit 2                # ilk 2 kullanıcıyı migrate et
-  python 04_run_migration.py --username ali veli      # sadece belirli kullanıcılar
-  python 04_run_migration.py --dry-run                # adımları yazdır, çalıştırma
+  python 04_run_migration.py                               # tüm pending kullanıcılar
+  python 04_run_migration.py --consumer-org Musti          # tek bir consumer org
+  python 04_run_migration.py --consumer-org Musti Trend    # birden fazla consumer org
+  python 04_run_migration.py --limit 2                     # ilk 2 kullanıcıyı migrate et
+  python 04_run_migration.py --username Mustafa            # belirli kullanıcı adıyla
+  python 04_run_migration.py --dry-run                     # adımları yazdır, çalıştırma
+  python 04_run_migration.py --batch-size 5                # özel batch boyutu
 """
 
 import os
 import sys
 import argparse
 
-from migration_state import get_pending_users, write_status_report
+from migration_state import get_pending_users, get_users_by_org, write_status_report
 from migration_steps import (
     step_01_create_kc_user,
     step_02_park_apic_email,
@@ -80,13 +82,14 @@ def migrate_user(username, consumer_org="", dry_run=False):
 # ANA BATCH DÖNGÜSÜ
 # ------------------------------------------------------------------------------
 
-def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None):
+def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None, consumer_orgs=None):
     """
     CSV'deki pending kullanıcıları batch'ler halinde migrate eder.
 
-    limit    : işlenecek maksimum kullanıcı sayısı (None = sınırsız)
-    usernames: sadece bu kullanıcı adları işlenir (None = hepsi)
-    İkisi birlikte verilebilir; önce username filtresi, sonra limit uygulanır.
+    consumer_orgs: sadece bu consumer org'lara ait kullanıcılar işlenir (önerilen filtre)
+    usernames    : sadece bu kullanıcı adları işlenir
+    limit        : işlenecek maksimum kullanıcı sayısı (None = sınırsız)
+    Filtreler birlikte kullanılabilir; sıra: consumer_org → username → limit.
     """
     pending = get_pending_users()
 
@@ -95,6 +98,14 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None):
         rpt = write_status_report()
         print(f"--> [BİLGİ] Güncel durum: {rpt}")
         return
+
+    # --consumer-org filtresi
+    if consumer_orgs:
+        org_set   = {o.lower() for o in consumer_orgs}
+        not_found = org_set - {u["consumer_org"].lower() for u in pending}
+        if not_found:
+            print(f"--> [UYARI] Şu org'lar CSV'de yok veya zaten migrate edilmiş: {', '.join(sorted(not_found))}")
+        pending = [u for u in pending if u.get("consumer_org", "").lower() in org_set]
 
     # --username filtresi
     if usernames:
@@ -121,10 +132,12 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None):
     print(f"  BATCH MİGRASYON BAŞLADI")
     print(f"  Toplam kullanıcı : {total}")
     print(f"  Batch boyutu     : {batch_size}")
+    if consumer_orgs:
+        print(f"  Org filtresi     : {', '.join(consumer_orgs)}")
+    if usernames:
+        print(f"  User filtresi    : {', '.join(usernames)}")
     if limit is not None:
         print(f"  Limit            : {limit}")
-    if usernames:
-        print(f"  Filtre           : {', '.join(usernames)}")
     if dry_run:
         print("  MOD              : DRY-RUN (hiçbir şey değiştirilmez)")
     print(f"{'='*60}\n")
@@ -191,6 +204,11 @@ if __name__ == "__main__":
         help="Adımları listele, gerçekten çalıştırma"
     )
     parser.add_argument(
+        "--consumer-org", nargs="+", dest="consumer_orgs", default=None,
+        metavar="ORG",
+        help="Sadece belirtilen consumer org'ları migrate et (boşlukla ayırarak birden fazla verilebilir)"
+    )
+    parser.add_argument(
         "--limit", type=int, default=None,
         help="İşlenecek maksimum kullanıcı sayısı (varsayılan: sınırsız)"
     )
@@ -206,4 +224,5 @@ if __name__ == "__main__":
         dry_run=args.dry_run,
         limit=args.limit,
         usernames=args.usernames,
+        consumer_orgs=args.consumer_orgs,
     )

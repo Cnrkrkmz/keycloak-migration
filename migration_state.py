@@ -70,6 +70,15 @@ def get_pending_users():
     return [u for u in load_users() if u.get("migrated", "false").lower() != "true"]
 
 
+def get_users_by_org(consumer_org):
+    """
+    Belirli bir consumer org adına ait tüm kullanıcıları döndürür.
+    Büyük/küçük harf duyarsız karşılaştırma yapar.
+    Org CSV'de yoksa boş liste döner.
+    """
+    return [u for u in load_users() if u.get("consumer_org", "").lower() == consumer_org.lower()]
+
+
 # ------------------------------------------------------------------------------
 # YAZMA
 # ------------------------------------------------------------------------------
