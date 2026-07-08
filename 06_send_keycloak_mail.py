@@ -1,4 +1,10 @@
 #!/usr/bin/env python3.11
+# ==============================================================================
+# KULLANILMIYOR — Bu dosya artık referans/arşiv amaçlıdır.
+# Bu fonksiyonellik migration_steps.py içindeki step_05_send_password_email()
+# fonksiyonuna taşınmıştır. 04_run_migration.py pipeline'ı bunu otomatik çalıştırır.
+# ==============================================================================
+
 import json
 import os
 import sys

@@ -6,10 +6,11 @@ CSV dosyasındaki (migration_users.csv) migrate edilmemiş kullanıcıları
 10'ar kullanıcılık batch'ler halinde işler.
 
 Her kullanıcı için sırayla şu adımları çalıştırır (migration_steps.py):
-  1. step_01_create_kc_user    → Keycloak'ta kullanıcı yarat
-  2. step_02_park_apic_email   → APIC e-postasını -old yap
-  3. step_03_jit_provision     → APIC JIT provision (OIDC login)
-  4. step_04_transfer_org      → Consumer Org sahipliğini Keycloak profiline devret
+  1. step_01_create_kc_user      → Keycloak'ta kullanıcı yarat
+  2. step_02_park_apic_email     → APIC e-postasını -old yap
+  3. step_03_jit_provision       → APIC JIT provision (JWT-Bearer)
+  4. step_04_transfer_org        → Consumer Org sahipliğini Keycloak profiline devret
+  5. step_05_send_password_email → Keycloak UPDATE_PASSWORD e-postası gönder
 
 Her 10 kullanıcı tamamlandığında özet rapor ekrana basılır.
 Batch içinde bir kullanıcı başarısız olursa o kullanıcı atlanır
@@ -33,6 +34,7 @@ from migration_steps import (
     step_02_park_apic_email,
     step_03_jit_provision,
     step_04_transfer_org,
+    step_05_send_password_email,
 )
 
 ENV_FILE   = "migration_env.sh"
@@ -45,16 +47,17 @@ BATCH_SIZE = 10
 
 def migrate_user(username, consumer_org="", dry_run=False):
     """
-    Tek bir kullanıcı için 4 adımlı migration pipeline'ını sırasıyla çalıştırır.
+    Tek bir kullanıcı için 5 adımlı migration pipeline'ını sırasıyla çalıştırır.
     Her adım migration_steps.py'den doğrudan import edilip çağrılır (subprocess yok).
     dry_run=True ise adım adım hangi fonksiyonun çalışacağını listeler, değişiklik yapmaz.
     Başarıda True, herhangi bir adım başarısız olursa False döner.
     """
     steps = [
-        ("1/4 KC_CREATE ", step_01_create_kc_user,  [username, consumer_org]),
-        ("2/4 EMAIL_UPD ", step_02_park_apic_email, [username]),
-        ("3/4 JIT_PROV  ", step_03_jit_provision,   [username]),
-        ("4/4 ORG_XFER  ", step_04_transfer_org,    [username]),
+        ("1/5 KC_CREATE  ", step_01_create_kc_user,        [username, consumer_org]),
+        ("2/5 EMAIL_UPD  ", step_02_park_apic_email,       [username]),
+        ("3/5 JIT_PROV   ", step_03_jit_provision,         [username]),
+        ("4/5 ORG_XFER   ", step_04_transfer_org,          [username]),
+        ("5/5 SEND_MAIL  ", step_05_send_password_email,   [username]),
     ]
 
     if dry_run:

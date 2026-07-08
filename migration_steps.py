@@ -822,6 +822,108 @@ def step_04_transfer_org(username):
 
 
 # ==============================================================================
+# ADIM 5 — Keycloak Şifre Belirleme E-postası
+# ==============================================================================
+
+def _get_kc_user_id(token, username):
+    """
+    Keycloak Admin API'sinden kullanıcının UUID'sini döndürür.
+    execute-actions-email endpoint'i kullanıcı adını değil UUID'yi bekler.
+    Bulunamazsa None döner.
+    """
+    target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
+    url = f"{_get_env('KEYCLOAK_URL')}/admin/realms/{target_realm}/users?username={username}&exact=true"
+    try:
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {token}")
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
+            users = json.loads(resp.read().decode())
+            if users:
+                return users[0]["id"]
+            print(f"--> [HATA] '{username}' Keycloak'ta bulunamadı!")
+            return None
+    except Exception as e:
+        print(f"--> [HATA] Kullanıcı UUID sorgusu başarısız: {e}")
+        return None
+
+
+def _send_update_password_email(token, user_id, username):
+    """
+    Keycloak Admin API üzerinden UPDATE_PASSWORD action e-postası gönderir.
+    Kullanıcıya şifre belirleme bağlantısı içeren e-posta iletilir.
+    HTTP 200 veya 204 başarı sayılır. Hata durumunda False döner.
+    """
+    target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
+    url = f"{_get_env('KEYCLOAK_URL')}/admin/realms/{target_realm}/users/{user_id}/execute-actions-email"
+    payload = json.dumps(["UPDATE_PASSWORD"]).encode("utf-8")
+    try:
+        req = urllib.request.Request(url, data=payload, method="PUT")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
+            if resp.status in (200, 204):
+                print(f"--> [BAŞARILI] '{username}' için şifre belirleme e-postası gönderildi.")
+                return True
+        return False
+    except urllib.error.HTTPError as e:
+        print(f"--> [HATA] Mail gönderilemedi (HTTP {e.code}): {e.read().decode()}")
+        return False
+    except Exception as e:
+        print(f"--> [HATA] Beklenmeyen hata: {e}")
+        return False
+
+
+def step_05_send_password_email(username):
+    """
+    Migration Adım 5/5 — Keycloak Şifre Belirleme E-postası
+
+    Migration tamamlandıktan (migrated=true) sonra kullanıcıya
+    Keycloak üzerinden UPDATE_PASSWORD e-postası gönderir.
+
+    1. CSV'de migrated=true değilse atlar — migration henüz tamamlanmamış demektir.
+    2. Keycloak admin token alır.
+    3. Kullanıcının Keycloak UUID'sini sorgular.
+    4. execute-actions-email endpoint'i ile UPDATE_PASSWORD tetikler.
+
+    Döner: başarıda True, hata durumunda False.
+
+    Müşteri Hataları:
+      migrated=false → önceki adımlar tamamlanmamış, önce migration'ı bitirin.
+      UUID bulunamadı → kullanıcı Keycloak'ta yok, step_01'i kontrol edin.
+      Mail gönderilemedi → Keycloak SMTP ayarları eksik/yanlış olabilir.
+    """
+    load_env()
+    csv_row = get_user(username)
+    if not csv_row:
+        print(f"--> [HATA] '{username}' CSV'de bulunamadı.")
+        return False
+
+    if csv_row.get("migrated", "false").lower() != "true":
+        print(f"--> [UYARI] '{username}' henüz migrate edilmemiş (migrated=false). E-posta atlanıyor.")
+        return False
+
+    print(f"\n--> [1/3] Keycloak admin token alınıyor...")
+    token = _get_kc_admin_token()
+    if not token:
+        return False
+
+    print(f"--> [2/3] '{username}' için Keycloak UUID sorgulanıyor...")
+    user_id = _get_kc_user_id(token, username)
+    if not user_id:
+        return False
+    print(f"--> [BİLGİ] UUID: {user_id}")
+
+    print(f"--> [3/3] UPDATE_PASSWORD e-postası tetikleniyor...")
+    if not _send_update_password_email(token, user_id, username):
+        return False
+
+    print("==================================================")
+    print(f"[TAMAMLANDI] '{username}' şifre belirleme e-postası gönderildi.")
+    print("==================================================")
+    return True
+
+
+# ==============================================================================
 # Tek kullanıcı testi için doğrudan çalıştırma
 # ==============================================================================
 
@@ -843,5 +945,6 @@ if __name__ == "__main__":
         and step_02_park_apic_email(_username)
         and step_03_jit_provision(_username)
         and step_04_transfer_org(_username)
+        and step_05_send_password_email(_username)
     )
     sys.exit(0 if ok else 1)
