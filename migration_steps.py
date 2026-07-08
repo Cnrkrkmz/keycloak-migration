@@ -605,7 +605,7 @@ def step_03_jit_provision(username):
         return False
 
     update_flag(username, "apic_jit_done", True)
-    
+
     _clear_temp_password()
 
     print("==================================================")

@@ -248,8 +248,9 @@ def main():
         print("--> [HATA] Hiç consumer org bulunamadı, çıkılıyor.")
         sys.exit(1)
 
-    existing = load_existing_csv()
-    new_rows  = []
+    # MEVCUT CSV'Yİ HAFIZAYA AL (Sözlük Formatında)
+    existing_users = load_existing_csv()
+
     skipped   = 0
     added     = 0
     failed    = 0
@@ -265,12 +266,6 @@ def main():
 
         owner = fetch_owner_info(server, prov_org, catalog, org_name, owner_url)
         if owner is None:
-            # None dönmesi iki anlama gelir:
-            #   1. Owner zaten Keycloak kullanıcısı (identity_provider eşleşti) → already
-            #   2. API hatası / üye bulunamadı → failed
-            # fetch_owner_info kendi mesajını zaten bastı; burada sadece sayacı ayarla.
-            # Keycloak atlama mesajı "[BİLGİ]" ile, API hatası "[UYARI]" ile başlar —
-            # ikisini de sessizce sayıyoruz, ayrım log'da görünür.
             already += 1
             continue
         if not owner.get("username"):
@@ -281,12 +276,13 @@ def main():
         username = owner["username"]
         email    = owner["email"]
 
-        if username in existing:
+        # EĞER KULLANICI ZATEN HAFIZADAKİ CSV'DE VARSA HİÇ DOKUNMA
+        if username in existing_users:
             print(f"--> [ATLA] '{username}' ({org_name}) zaten CSV'de kayıtlı.")
-            new_rows.append(existing[username])
             skipped += 1
             continue
 
+        # EĞER YENİ BİR KULLANICIYSA, ONU DA MEVCUT HAFIZAYA (SÖZLÜĞE) EKLE
         row = {
             "username":          username,
             "consumer_org":      org_name,
@@ -299,7 +295,7 @@ def main():
             "migrated":          "false",
             "migrated_at":       "",
         }
-        new_rows.append(row)
+        existing_users[username] = row
         added += 1
         print(f"--> [+] {username:<30} | {org_name:<40} | {email}")
 
@@ -314,12 +310,13 @@ def main():
     if args.dry_run:
         print("\n--> [DRY-RUN] CSV'ye yazılmadı.")
     else:
-        write_csv(new_rows)
-        print(f"\n--> [BAŞARILI] {len(new_rows)} satır '{CSV_FILE}' dosyasına yazıldı.")
+        # MEVCUT + YENİ EKLENEN HER ŞEYİ (TÜM SÖZLÜĞÜ) DOSYAYA YAZ
+        final_rows = list(existing_users.values())
+        write_csv(final_rows)
+        print(f"\n--> [BAŞARILI] {len(final_rows)} satır '{CSV_FILE}' dosyasına yazıldı.")
         print(f"    Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     print("==================================================\n")
-
 
 if __name__ == "__main__":
     main()

@@ -13,27 +13,9 @@ _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
-from migration_state import get_user, get_pending_users, mark_rollback
-
-# ==============================================================================
-# ROLLBACK SCRİPTİ — Yarıda kalan veya başarısız migration'ı geri alır.
-# ==============================================================================
-# Çalıştırma sırası: 07 (hata durumunda — isteğe bağlı)
-#
-# Kullanım:
-#   Tek kullanıcı     : python 07_rollback.py <username>
-#   Tüm yarım kalanlar: python 07_rollback.py
-#
-# Her flag için ne geri alınır:
-#   apic_provisioned=true → APIC'te Keycloak registry'sindeki shadow user'ı sil
-#   email_updated=true    → APIC Local Registry'de e-postayı orijinaline geri al
-#   kc_created=true       → Keycloak'tan kullanıcıyı sil
-#
-# Sıra intentionally ters: önce en son yapılan geri alınır.
-# ==============================================================================
+from migration_state import get_user, get_pending_users, mark_rollback, load_users
 
 ENV_FILE = "migration_env.sh"
-
 
 def load_env():
     if not os.path.exists(ENV_FILE):
@@ -47,7 +29,6 @@ def load_env():
                 if len(kv) == 2:
                     os.environ[kv[0]] = kv[1].strip('"\'')
 
-
 load_env()
 
 APIC_SERVER       = os.environ.get("APIC_SERVER")
@@ -60,41 +41,127 @@ KEYCLOAK_ADMIN_PASSWORD = os.environ.get("KEYCLOAK_ADMIN_PASSWORD")
 TARGET_REALM      = os.environ.get("KEYCLOAK_REALM_NAME", "apic-demo")
 CATALOG           = os.environ.get("CATALOG", "")
 
-
 # ------------------------------------------------------------------------------
-# ADIM R1 — APIC shadow user sil (apic_provisioned geri al)
+# ADIM R0 — Tapuyu Geri Ver (DÜZELTİLDİ: Doğru YAML Payload Formatı)
 # ------------------------------------------------------------------------------
-
-def rollback_apic_shadow_user(username):
-    """
-    APIC'teki Keycloak registry'sine ait shadow user kaydını siler.
-    Yeni mimaride (preferred_username) shadow user adı doğrudan username ile aynıdır.
-    """
+def _get_local_user_url(username):
     cmd = [
-        "apic", "users:delete", username,
+        "apic", "users:get", username,
+        "-s", APIC_SERVER, "-o", PROV_ORG,
+        "--user-registry", LOCAL_REGISTRY,
+        "--format", "json", "--output", "-"
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return json.loads(res.stdout).get("url")
+    except Exception:
+        return None
+
+def _ensure_member_and_get_url(consumer_org, username, user_url):
+    # Üye yap (zaten üyeyse idempotent'tir)
+    yaml_content = f'name: "{username}-local"\ntitle: "{username}"\nuser:\n  url: "{user_url}"\n'
+    cmd_add = [
+        "apic", "members:create", "--scope", "consumer-org", "-",
+        "-s", APIC_SERVER, "-o", PROV_ORG, "-c", CATALOG,
+        "--consumer-org", consumer_org
+    ]
+    subprocess.run(cmd_add, input=yaml_content, capture_output=True, text=True)
+
+    # Member URL'yi al
+    cmd_list = [
+        "apic", "members:list", "--scope", "consumer-org",
+        "-s", APIC_SERVER, "-o", PROV_ORG, "-c", CATALOG,
+        "--consumer-org", consumer_org,
+        "--format", "json", "--output", "-"
+    ]
+    try:
+        res = subprocess.run(cmd_list, capture_output=True, text=True, check=True)
+        items = json.loads(res.stdout)
+        items = items.get("results", items if isinstance(items, list) else [items])
+        for m in items:
+            if m.get("user", {}).get("url") == user_url:
+                return m.get("url")
+    except Exception:
+        pass
+    return None
+
+def revert_org_ownership(consumer_org, local_username):
+    user_url = _get_local_user_url(local_username)
+    if not user_url:
+        print(f"--> [HATA] Local kullanıcı URL'si alınamadı ({local_username}).")
+        return False
+
+    member_url = _ensure_member_and_get_url(consumer_org, local_username, user_url)
+    if not member_url:
+        print(f"--> [HATA] Local kullanıcı Member URL'si alınamadı.")
+        return False
+
+    yaml_content = f"new_owner_member_url: {member_url}\n"
+    cmd = [
+        "apic", "consumer-orgs:transfer-owner", consumer_org, "-",
+        "-s", APIC_SERVER, "-o", PROV_ORG, "-c", CATALOG,
+        "--cascade"
+    ]
+    try:
+        subprocess.run(cmd, input=yaml_content, capture_output=True, text=True, check=True)
+        print(f"--> [ROLLBACK] '{consumer_org}' tapusu Local Registry'ye ({local_username}) geri devredildi.")
+        return True
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.strip() or e.stdout.strip()
+        if "already the owner" in err.lower():
+            print("--> [ROLLBACK] Local kullanıcı zaten organizasyonun sahibi, devir atlandı.")
+            return True
+        print(f"--> [UYARI] Tapu devri geri alınamadı: {err}")
+        return False
+
+# ------------------------------------------------------------------------------
+# ADIM R1 — Nokta Atışı APIC shadow user silme
+# ------------------------------------------------------------------------------
+def _get_exact_apic_kc_username(target_email):
+    cmd = [
+        "apic", "users:list",
+        "-s", APIC_SERVER, "-o", PROV_ORG,
+        "--user-registry", KEYCLOAK_REGISTRY,
+        "--format", "json", "--output", "-"
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(res.stdout)
+        items = data.get("results", data if isinstance(data, list) else [data])
+        for u in items:
+            if u.get("email") == target_email:
+                return u.get("name") or u.get("username")
+        return None
+    except Exception:
+        return None
+
+def rollback_apic_shadow_user(username, target_email):
+    exact_username = _get_exact_apic_kc_username(target_email)
+    if not exact_username:
+        print(f"--> [ROLLBACK] '{target_email}' e-postasına sahip APIC shadow user zaten yok, atlanıyor.")
+        return True
+
+    cmd = [
+        "apic", "users:delete", exact_username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
         "--user-registry", KEYCLOAK_REGISTRY,
     ]
     try:
         subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"--> [ROLLBACK] APIC shadow user '{username}' silindi.")
+        print(f"--> [ROLLBACK] APIC shadow user '{exact_username}' başarıyla silindi.")
         return True
     except subprocess.CalledProcessError as e:
         err = e.stderr.strip() or e.stdout.strip()
-        if "not found" in err.lower() or "404" in err:
-            print(f"--> [ROLLBACK] APIC shadow user zaten yok, atlanıyor.")
+        if "read only" in err.lower():
+            print("--> [BİLGİ] Kullanıcı read-only sistem hesabı, silme atlandı.")
             return True
         print(f"--> [HATA] APIC shadow user silinemedi: {err}")
         return False
 
 # ------------------------------------------------------------------------------
-# ADIM R2 — APIC e-postasını orijinaline geri al (email_updated geri al)
+# ADIM R2 — APIC e-postasını orijinaline geri al
 # ------------------------------------------------------------------------------
-
 def rollback_apic_email(username, target_email):
-    """APIC Local Registry'de e-postayı hedef değere geri yazar."""
-    # Mevcut first_name/last_name'i almaya çalış — başarısız olursa boş bırak,
-    # users:update email-only güncellemeyi kabul eder.
     cmd_get = [
         "apic", "users:get", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
@@ -108,19 +175,12 @@ def rollback_apic_email(username, target_email):
         current = json.loads(res.stdout)
         first_name = current.get("first_name") or current.get("firstName") or ""
         last_name  = current.get("last_name")  or current.get("lastName")  or ""
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.strip() or e.stdout.strip()
-        print(f"--> [UYARI] Kullanıcı detayı alınamadı, güncelleme yine de denenecek: {err}")
-    except Exception as e:
-        print(f"--> [UYARI] Kullanıcı detayı alınamadı, güncelleme yine de denenecek: {e}")
+    except Exception:
+        pass
 
-    yaml_content = f"""email: {target_email}
-title: {username}
-"""
-    if first_name:
-        yaml_content += f"first_name: {first_name}\n"
-    if last_name:
-        yaml_content += f"last_name: {last_name}\n"
+    yaml_content = f"email: {target_email}\ntitle: {username}\n"
+    if first_name: yaml_content += f"first_name: {first_name}\n"
+    if last_name: yaml_content += f"last_name: {last_name}\n"
 
     cmd_upd = [
         "apic", "users:update", username, "-",
@@ -135,11 +195,9 @@ title: {username}
         print(f"--> [HATA] E-posta geri alınamadı: {e.stderr.strip() or e.stdout.strip()}")
         return False
 
-
 # ------------------------------------------------------------------------------
-# ADIM R3 — Keycloak kullanıcısını sil (kc_created geri al)
+# ADIM R3 — Keycloak kullanıcısını sil
 # ------------------------------------------------------------------------------
-
 def _get_kc_admin_token():
     url = f"{KEYCLOAK_URL}/realms/master/protocol/openid-connect/token"
     data = urllib.parse.urlencode({
@@ -152,65 +210,38 @@ def _get_kc_admin_token():
         req = urllib.request.Request(url, data=data)
         with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode()).get("access_token")
-    except Exception as e:
-        print(f"--> [HATA] KC admin token alınamadı: {e}")
+    except Exception:
         return None
 
-
-def _get_kc_uuid(username):
-    """Keycloak'tan kullanıcının UUID'sini döndürür."""
+def rollback_kc_user(username):
     token = _get_kc_admin_token()
-    if not token:
-        return None
-    url = f"{KEYCLOAK_URL}/admin/realms/{TARGET_REALM}/users?username={username}&exact=true"
+    if not token: return False
+
+    url_get = f"{KEYCLOAK_URL}/admin/realms/{TARGET_REALM}/users?username={username}&exact=true"
     try:
-        req = urllib.request.Request(url)
+        req = urllib.request.Request(url_get)
         req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             users = json.loads(resp.read().decode())
-            return users[0]["id"] if users else None
+            if not users:
+                print(f"--> [ROLLBACK] Keycloak'ta '{username}' zaten yok, atlanıyor.")
+                return True
+            kc_uuid = users[0]["id"]
+
+            req_del = urllib.request.Request(f"{KEYCLOAK_URL}/admin/realms/{TARGET_REALM}/users/{kc_uuid}", method="DELETE")
+            req_del.add_header("Authorization", f"Bearer {token}")
+            with urllib.request.urlopen(req_del, context=_SSL_CTX) as resp_del:
+                if resp_del.status in (200, 204):
+                    print(f"--> [ROLLBACK] Keycloak kullanıcısı '{username}' silindi.")
+                    return True
     except Exception as e:
-        print(f"--> [HATA] KC kullanıcı sorgusu başarısız: {e}")
-        return None
-
-
-def rollback_kc_user(username):
-    """Keycloak'taki kullanıcıyı UUID üzerinden siler."""
-    token = _get_kc_admin_token()
-    if not token:
+        print(f"--> [HATA] KC kullanıcı silinemedi: {e}")
         return False
 
-    kc_uuid = _get_kc_uuid(username)
-    if not kc_uuid:
-        print(f"--> [ROLLBACK] Keycloak'ta '{username}' zaten yok, atlanıyor.")
-        return True
-
-    url = f"{KEYCLOAK_URL}/admin/realms/{TARGET_REALM}/users/{kc_uuid}"
-    try:
-        req = urllib.request.Request(url, method="DELETE")
-        req.add_header("Authorization", f"Bearer {token}")
-        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
-            if resp.status in (200, 204):
-                print(f"--> [ROLLBACK] Keycloak kullanıcısı '{username}' silindi.")
-                return True
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            print(f"--> [ROLLBACK] Keycloak kullanıcısı zaten yok, atlanıyor.")
-            return True
-        print(f"--> [HATA] KC kullanıcı silinemedi (HTTP {e.code}): {e.read().decode()}")
-    return False
-
-
 # ------------------------------------------------------------------------------
-# DURUM TESPİTİ — APIC ve KC'ye bakarak gerçek durumu öğren
+# DURUM TESPİTİ VE ORKESTRATÖR
 # ------------------------------------------------------------------------------
-
 def detect_apic_email_parked(username):
-    """
-    APIC'ten kullanıcının mevcut e-postasını okur.
-    E-posta '-old@' içeriyorsa email park edilmiş demektir → True döner.
-    Kullanıcı bulunamazsa veya e-posta okunamazsa None döner.
-    """
     cmd = [
         "apic", "users:get", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
@@ -219,20 +250,12 @@ def detect_apic_email_parked(username):
     ]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        data = json.loads(res.stdout)
-        email = data.get("email", "")
+        email = json.loads(res.stdout).get("email", "")
         return "-old@" in email, email
-    except subprocess.CalledProcessError as e:
-        err = e.stderr.strip() or e.stdout.strip()
-        print(f"--> [UYARI] APIC'ten e-posta okunamadı ({username}): {err}")
+    except Exception:
         return None, None
-    except Exception as e:
-        print(f"--> [UYARI] APIC'ten e-posta okunamadı ({username}): {e}")
-        return None, None
-
 
 def derive_target_email(source_email):
-    """Ne kadar '-old' suffix'i varsa hepsini temizleyerek orijinal hedef e-postayı hesaplar."""
     if source_email and "@" in source_email:
         parts = source_email.split("@")
         username_part = parts[0]
@@ -241,57 +264,40 @@ def derive_target_email(source_email):
         return f"{username_part}@{parts[1]}"
     return source_email
 
-
-# ------------------------------------------------------------------------------
-# ROLLBACK ORKESTRATÖRü
-# ------------------------------------------------------------------------------
-
 def rollback_user(csv_row, force=False):
-    """
-    Tek bir kullanıcı için tamamlanmış adımları ters sırayla geri alır.
-    Herhangi bir adım başarısız olursa durur ve False döner.
-
-    force=True: CSV flag'lerine bakmadan APIC ve KC'ye bakarak gerçek
-                durumu tespit eder. CSV'nin eski/eksik olduğu durumlarda kullan.
-    """
     username     = csv_row["username"]
     target_email = csv_row.get("target_email", "")
+    consumer_org = csv_row.get("consumer_org", "")
 
     print(f"\n{'='*50}")
     print(f"  ROLLBACK: {username}{'  [FORCE]' if force else ''}")
     print(f"{'='*50}")
 
-    # Force modunda flag'leri gerçek durumdan hesapla
     if force:
         parked, current_email = detect_apic_email_parked(username)
-        kc_exists = bool(_get_kc_uuid(username))
-        do_r2 = (parked is True)
-        do_r3 = kc_exists
-        # target_email: CSV'de -old@ ile yazılmışsa gerçek e-postayı hesapla
-        if not target_email or "-old@" in target_email:
-            target_email = derive_target_email(current_email or target_email)
-        print(f"--> [FORCE] APIC e-posta parked={parked}  KC exists={kc_exists}")
-        print(f"--> [FORCE] Geri alınacak hedef e-posta: {target_email}")
-    else:
-        do_r2 = csv_row.get("apic_email_parked", "false").lower() == "true"
-        do_r3 = csv_row.get("kc_user_created",   "false").lower() == "true"
+        target_email = derive_target_email(current_email or target_email)
 
-    # R1: apic_jit_done → shadow user sil (force modda her zaman dene)
+    # R0: Tapuyu Kurtar (Eğer Org varsa)
+    if consumer_org and (force or csv_row.get("org_owner_xfrd", "false").lower() == "true"):
+        print("--> [R0] Consumer Org tapusu Local kullanıcıya geri devrediliyor...")
+        revert_org_ownership(consumer_org, username)
+
+    # R1: Gölgeyi Sil
     if force or csv_row.get("apic_jit_done", "false").lower() == "true":
-        print("--> [R1] APIC shadow user siliniyor...")
-        if not rollback_apic_shadow_user(username):
+        print("--> [R1] APIC shadow user aranıyor ve siliniyor...")
+        if not rollback_apic_shadow_user(username, target_email):
             print(f"--> [DURDURULDU] '{username}' rollback R1'de başarısız oldu.")
             return False
 
-    # R2: apic_email_parked → hedef e-postaya dön
-    if do_r2:
+    # R2: E-postayı İade Et
+    if force or csv_row.get("apic_email_parked", "false").lower() == "true":
         print(f"--> [R2] APIC e-postası '{target_email}' olarak geri alınıyor...")
         if not rollback_apic_email(username, target_email):
             print(f"--> [DURDURULDU] '{username}' rollback R2'de başarısız oldu.")
             return False
 
-    # R3: kc_user_created → KC kullanıcısını sil
-    if do_r3:
+    # R3: Keycloak'u Temizle
+    if force or csv_row.get("kc_user_created", "false").lower() == "true":
         print("--> [R3] Keycloak kullanıcısı siliniyor...")
         if not rollback_kc_user(username):
             print(f"--> [DURDURULDU] '{username}' rollback R3'de başarısız oldu.")
@@ -301,46 +307,26 @@ def rollback_user(csv_row, force=False):
     print(f"--> [ROLLBACK TAMAMLANDI] '{username}' sanki hiç dokunulmamış gibi sıfırlandı.")
     return True
 
-
-# ------------------------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------------------------
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="Migration adımlarını geri alır."
-    )
+    parser = argparse.ArgumentParser(description="Migration adımlarını geri alır.")
     parser.add_argument("username", nargs="?", help="Tek kullanıcı rollback (opsiyonel)")
-    parser.add_argument(
-        "--force", action="store_true",
-        help="CSV flag'lerine bakmadan APIC ve KC'ye bakarak gerçek durumu tespit et ve geri al"
-    )
+    parser.add_argument("--force", action="store_true", help="Başarılı olanlar dahil tüm listeyi geri al")
     args = parser.parse_args()
 
     if args.username:
         csv_row = get_user(args.username)
         if not csv_row:
-            # --force ile CSV'de olmayan kullanıcı da rollback edilebilir
-            if args.force:
-                csv_row = {"username": args.username, "target_email": ""}
+            if args.force: csv_row = {"username": args.username, "target_email": ""}
             else:
                 print(f"--> [HATA] '{args.username}' CSV'de bulunamadı.")
                 sys.exit(1)
         success = rollback_user(csv_row, force=args.force)
         sys.exit(0 if success else 1)
     else:
-        pending = get_pending_users()
-
-        if args.force:
-            # Force modda tüm pending kullanıcıları işle (flag durumuna bakma)
-            to_rollback = pending
-        else:
-            # Normal modda sadece en az bir flag'i true olanları al
-            to_rollback = [
-                u for u in pending
-                if any(u.get(f, "false").lower() == "true"
-                       for f in ("kc_user_created", "apic_email_parked", "apic_jit_done", "org_owner_xfrd"))
-            ]
+        # --force ile başarılılar dahil bütün CSV'yi çeker
+        to_rollback = load_users() if args.force else [
+            u for u in get_pending_users() if any(u.get(f, "false").lower() == "true" for f in ("kc_user_created", "apic_email_parked", "apic_jit_done", "org_owner_xfrd"))
+        ]
 
         if not to_rollback:
             print("--> [BİLGİ] Rollback gereken kullanıcı yok.")
@@ -358,7 +344,6 @@ def main():
             sys.exit(1)
         else:
             print("[TAMAMLANDI] Tüm rollback işlemleri başarılı.")
-
 
 if __name__ == "__main__":
     main()
