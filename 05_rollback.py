@@ -68,22 +68,16 @@ CATALOG           = os.environ.get("CATALOG", "")
 def rollback_apic_shadow_user(username):
     """
     APIC'teki Keycloak registry'sine ait shadow user kaydını siler.
-    'username' burada Keycloak UUID'sidir (sub claim) — önce KC'den çekilir.
+    Yeni mimaride (preferred_username) shadow user adı doğrudan username ile aynıdır.
     """
-    # Shadow user'ın APIC'teki adı = Keycloak UUID. Önce KC'den UUID'yi bul.
-    kc_uuid = _get_kc_uuid(username)
-    if not kc_uuid:
-        print(f"--> [UYARI] Keycloak'ta '{username}' bulunamadı, APIC shadow user silme atlanıyor.")
-        return True  # KC yoksa shadow user da yoktur
-
     cmd = [
-        "apic", "users:delete", kc_uuid,
+        "apic", "users:delete", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
         "--user-registry", KEYCLOAK_REGISTRY,
     ]
     try:
         subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"--> [ROLLBACK] APIC shadow user '{kc_uuid}' silindi.")
+        print(f"--> [ROLLBACK] APIC shadow user '{username}' silindi.")
         return True
     except subprocess.CalledProcessError as e:
         err = e.stderr.strip() or e.stdout.strip()
@@ -92,7 +86,6 @@ def rollback_apic_shadow_user(username):
             return True
         print(f"--> [HATA] APIC shadow user silinemedi: {err}")
         return False
-
 
 # ------------------------------------------------------------------------------
 # ADIM R2 — APIC e-postasını orijinaline geri al (email_updated geri al)

@@ -1,19 +1,26 @@
 #!/usr/bin/env python3.11
 """
-00_export_consumer_orgs.py — APIC Consumer Org & Owner Dışa Aktarma
+03_export_consumer_orgs.py — APIC Consumer Org & Owner Dışa Aktarma
 
-Çalıştırma sırası: 00  (02_setup_and_login.py'den SONRA, diğer her şeyden ÖNCE)
+Çalıştırma sırası: 03  (00_setup_env.py'den SONRA, 04_run_migration.py'den ÖNCE)
 
 Tüm consumer org'ları APIC API'sinden sayfalama (paging) ile çeker,
 her org'un owner kullanıcısını ayrıca sorgular ve sonuçları
 migration_users.csv dosyasına yazar.
 
-Bu CSV, 06_run_migration_batch.py tarafından migration input'u olarak kullanılır.
+Bu CSV, 04_run_migration.py tarafından migration input'u olarak kullanılır.
+
+Ne Zaman Tekrar Çalıştırılır:
+  - Migration'dan önce ilk kez mutlaka çalıştırılmalıdır (CSV oluşturur).
+  - APIC'e yeni consumer org eklendiyse tekrar çalıştırılabilir;
+    mevcut CSV'deki kayıtları korur, sadece yeni org'ları ekler.
+  - Zaten migrate edilmiş (migrated=true) kullanıcılar CSV'de kalır,
+    bir sonraki çalıştırmada tekrar eklenmez (username kontrolü).
 
 Kullanım:
-  python 00_export_consumer_orgs.py              # tüm org'lar
-  python 00_export_consumer_orgs.py --page-size 25   # sayfa boyutunu özelleştir
-  python 00_export_consumer_orgs.py --dry-run    # sadece ekrana yaz, CSV'ye yazma
+  python 03_export_consumer_orgs.py              # tüm org'lar
+  python 03_export_consumer_orgs.py --page-size 25   # sayfa boyutunu özelleştir
+  python 03_export_consumer_orgs.py --dry-run    # sadece ekrana yaz, CSV'ye yazma
 """
 
 import subprocess
@@ -50,8 +57,12 @@ CSV_FIELDS = [
 # ------------------------------------------------------------------------------
 
 def load_env():
+    """
+    migration_env.sh dosyasını okuyarak 'export KEY="VALUE"' satırlarını
+    os.environ'a yükler. Dosya yoksa hata verip çıkar.
+    """
     if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Önce 02_setup_and_login.py'i çalıştırın.")
+        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Önce 00_setup_env.py'i çalıştırın.")
         sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
@@ -175,7 +186,11 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
 # ------------------------------------------------------------------------------
 
 def load_existing_csv():
-    """Mevcut CSV'yi {username: row} dict olarak döndürür."""
+    """
+    Mevcut migration_users.csv dosyasını {username: row} dict olarak döndürür.
+    Dosya yoksa boş dict döner. Yeniden çalıştırmalarda mevcut kayıtları
+    korumak için kullanılır.
+    """
     if not os.path.exists(CSV_FILE):
         return {}
     with open(CSV_FILE, newline="", encoding="utf-8") as f:
@@ -183,6 +198,12 @@ def load_existing_csv():
 
 
 def write_csv(rows):
+    """
+    Tüm satırları (mevcut + yeni) migration_users.csv'ye yazar.
+    Her çalıştırmada dosyanın tamamını yeniden yazar; bu nedenle
+    load_existing_csv() ile eski kayıtlar önce belleğe alınıp
+    new_rows listesine dahil edilir.
+    """
     with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         writer.writeheader()

@@ -17,8 +17,14 @@ ENV_FILE = "migration_env.sh"
 
 
 def load_env():
+    """
+    migration_env.sh dosyasını okuyarak içindeki 'export KEY="VALUE"'
+    satırlarını os.environ'a yükler. Dosya yoksa hata verip çıkar.
+    Bu sayede 00_setup_env.py'nin kaydettiği tüm değişkenler
+    bu scriptte kullanılabilir hale gelir.
+    """
     if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Önce 02_setup_and_login.py'i çalıştırın.")
+        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Önce 00_setup_env.py'i çalıştırın.")
         sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
@@ -38,7 +44,12 @@ LOCAL_REGISTRY = os.environ.get("LOCAL_REGISTRY", "sandbox-catalog")
 
 
 def get_user_url(username):
-    """Local Registry'deki kullanıcının APIC URL'sini döndürür."""
+    """
+    Verilen kullanıcı adına ait Local Registry kaydını APIC CLI üzerinden
+    sorgular ve kullanıcının tam APIC URL'sini döndürür.
+    Consumer Org oluştururken 'owner_url' alanına bu URL verilmesi gerekir.
+    Kullanıcı bulunamazsa None döner.
+    """
     cmd = [
         "apic", "users:get", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
@@ -59,8 +70,10 @@ def get_user_url(username):
 
 def create_consumer_org(org_name, owner_username, owner_url):
     """
-    Belirtilen isimde bir Consumer Org oluşturur ve owner'ı atar.
-    APIC, consumer org yaratılırken owner'ı otomatik olarak org'a üye yapar.
+    Belirtilen isimde bir Consumer Org oluşturur ve owner olarak owner_url'yi atar.
+    APIC CLI'ye YAML formatında girdi verilir (stdin üzerinden).
+    Org zaten mevcutsa hata vermez, idempotent davranır.
+    Başarılı olursa True, hata olursa False döner.
     """
     yaml_content = f"""name: "{org_name}"
 title: "{org_name}"
@@ -85,6 +98,11 @@ owner_url: "{owner_url}"
 
 
 def main():
+    """
+    Kullanıcıdan org adı ve owner kullanıcı adını alır,
+    sırayla get_user_url() → create_consumer_org() çağırır.
+    Owner kullanıcı Local Registry'de yoksa işlemi durdurur.
+    """
     print("\n==================================================")
     print("        CONSUMER ORG OLUŞTURMA                   ")
     print("==================================================")

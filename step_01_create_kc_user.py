@@ -1,4 +1,41 @@
 #!/usr/bin/env python3.11
+"""
+# ==============================================================================
+# KULLANILMIYOR — Bu dosya artık referans/arşiv amaçlıdır.
+# Tüm adımlar migration_steps.py içinde birleştirilmiştir.
+# 04_run_migration.py artık bu dosyayı değil, migration_steps.py'yi kullanır.
+# ==============================================================================
+
+step_01_create_kc_user.py — Migration Adım 1/4: Keycloak'ta Kullanıcı Oluşturma
+=================================================================================
+Çalıştıran : 04_run_migration.py (subprocess olarak)
+Girdi      : Komut satırından kullanıcı adı (sys.argv[1]) veya interaktif
+Çıktı      : migration_users.csv → kc_user_created = true
+             migration_env.sh   → KC_TEMP_PASSWORD = <rastgele 16 karakter>
+
+Ne Yapar:
+  1. APIC Local Registry'den kullanıcının adını, e-postasını ve isim bilgilerini çeker.
+  2. Keycloak Admin API'si üzerinden hedef realm'e (ör. apic-demo) kullanıcıyı ekler.
+     - E-posta adresi olarak kullanıcının orijinal adresi kullanılır.
+     - 16 karakterlik kriptografik rastgele geçici şifre atanır.
+  3. Geçici şifreyi migration_env.sh'a yazar; sonraki adım (step_03) bunu okur.
+  4. CSV'de kc_user_created = true olarak işaretler.
+
+Müşteri Ortamında Karşılaşılabilecek Hatalar:
+  - "APIC komutu reddedildi / Not found":
+      Kullanıcı APIC Local Registry'de değil; UUID gibi bir shadow user adı
+      girilmiş olabilir. Keycloak registry'sine ait shadow user'lar APIC Local
+      Registry'de bulunmaz.
+  - "HTTP 409 / Kullanıcı zaten mevcut":
+      Keycloak'ta aynı username ile kayıt var. Script bunu uyarı olarak geçer
+      ama geçici şifre yazamaz; step_03 başarısız olur.
+      Çözüm: Keycloak'taki mevcut kaydı sil veya step_03'ü atla.
+  - "Token alınamadı":
+      Keycloak admin credential'ları yanlış ya da Keycloak erişilemiyor.
+  - "Keycloak için zorunlu alanlar eksik":
+      APIC'teki kullanıcının e-posta adresi boş. Önce APIC'te tamamlanmalı.
+"""
+
 import subprocess
 import json
 import os
@@ -9,187 +46,196 @@ import urllib.parse
 import secrets
 import string
 
+# Lab/test ortamlarında self-signed sertifika kullanıldığında SSL doğrulaması
+# başarısız olur. Üretimde CA-signed sertifika kullanılmalı ve bu blok kaldırılmalı.
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
 from migration_state import get_user, add_user, update_flag
-# add_user imzası: add_user(username, consumer_org, email_source)
-
-# ==============================================================================
-# step_01_create_kc_user.py — Keycloak kullanıcısı oluşturma
-# Çalıştıran: 04_run_migration.py (adım 1/4)
-# ==============================================================================
 
 ENV_FILE = "migration_env.sh"
 
-def load_env():
-    """migration_env.sh dosyasını okuyup ortama yükler."""
-    if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Lütfen önce kurulum scriptini çalıştırın.")
-        sys.exit(1)
 
+def load_env():
+    """migration_env.sh dosyasını okuyup os.environ'a yükler."""
+    if not os.path.exists(ENV_FILE):
+        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Lütfen önce 00_setup_env.py'yi çalıştırın.")
+        sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
             line = line.strip()
             if line.startswith("export "):
-                key_value = line[7:].split("=", 1)
-                if len(key_value) == 2:
-                    key = key_value[0]
-                    value = key_value[1].strip('"\'')
-                    os.environ[key] = value
+                kv = line[7:].split("=", 1)
+                if len(kv) == 2:
+                    os.environ[kv[0]] = kv[1].strip('"\'')
 
-# Ortam değişkenlerini belleğe yükle
+
 load_env()
 
-APIC_SERVER = os.environ.get("APIC_SERVER")
-PROV_ORG = os.environ.get("PROV_ORG")
-LOCAL_REGISTRY = os.environ.get("LOCAL_REGISTRY")
-KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL")
-KEYCLOAK_ADMIN_USER = os.environ.get("KEYCLOAK_ADMIN_USER")
-KEYCLOAK_ADMIN_PASSWORD = os.environ.get("KEYCLOAK_ADMIN_PASSWORD")
-TARGET_REALM = "apic-demo"
+APIC_SERVER          = os.environ.get("APIC_SERVER")
+PROV_ORG             = os.environ.get("PROV_ORG")
+LOCAL_REGISTRY       = os.environ.get("LOCAL_REGISTRY")
+KEYCLOAK_URL         = os.environ.get("KEYCLOAK_URL")
+KEYCLOAK_ADMIN_USER  = os.environ.get("KEYCLOAK_ADMIN_USER")
+KEYCLOAK_ADMIN_PASS  = os.environ.get("KEYCLOAK_ADMIN_PASSWORD")
+# TARGET_REALM: Kullanıcıların oluşturulacağı Keycloak realm. migration_env.sh'dan okunur.
+TARGET_REALM         = os.environ.get("KEYCLOAK_REALM_NAME", "apic-demo")
 
 if len(sys.argv) > 1:
     DEMO_USERNAME = sys.argv[1]
 else:
     DEMO_USERNAME = input("Migrate edilecek APIC Kullanıcı Adı: ").strip()
 
-# Consumer Org bilgisi CSV'den gelir (add_user çağrısında); fallback olarak env'den okunur
-CONSUMER_ORG = os.environ.get("CONSUMER_ORG", "")   # fallback; asıl değer CSV'den gelir
+# Consumer Org bilgisi normalde CSV'den gelir. Script doğrudan çalıştırılırsa
+# env'den okur; batch modunda her zaman CSV zaten dolu olacaktır.
+CONSUMER_ORG = os.environ.get("CONSUMER_ORG", "")
+
 
 # ------------------------------------------------------------------------------
-# KULLANICI OBJESİ (CLASS)
+# APIC kullanıcısını temsil eden hafif veri sınıfı
 # ------------------------------------------------------------------------------
+
 class ApicUser:
     """
-    APIC'ten gelen karmaşık JSON verisini alıp, sadece ihtiyacımız olan
-    verileri barındıran temiz bir Python objesine dönüştürür.
+    APIC'ten gelen ham JSON verisini alıp yalnızca migration için
+    gerekli alanları tutan sade bir nesneye dönüştürür.
     """
-    def __init__(self, raw_json_data):
-        self.username = raw_json_data.get("username") or raw_json_data.get("name") or ""
-        self.email = raw_json_data.get("email") or ""
-        self.first_name = raw_json_data.get("first_name") or raw_json_data.get("firstName") or ""
-        self.last_name = raw_json_data.get("last_name") or raw_json_data.get("lastName") or ""
+    def __init__(self, raw):
+        # APIC bazı versiyonlarda snake_case, bazılarında camelCase döndürür;
+        # ikisini de destekliyoruz.
+        self.username   = raw.get("username") or raw.get("name") or ""
+        self.email      = raw.get("email") or ""
+        self.first_name = raw.get("first_name") or raw.get("firstName") or ""
+        self.last_name  = raw.get("last_name")  or raw.get("lastName")  or ""
 
     def is_valid(self):
-        """Keycloak için zorunlu alanların dolu olup olmadığını kontrol eder."""
+        """Keycloak'ta hesap açmak için en az username ve email gereklidir."""
         return bool(self.username and self.email)
 
+
 # ------------------------------------------------------------------------------
-# FONKSİYONLAR
+# APIC'ten kullanıcı verisi çekme
 # ------------------------------------------------------------------------------
-def get_apic_user_as_object(username):
+
+def get_apic_user(username):
     """
-    APIC'ten kullanıcı datasını doğrudan STDOUT üzerinden (dosya yaratmadan)
-    çeker ve ApicUser objesi olarak döndürür.
+    APIC Local Registry'den kullanıcıyı JSON olarak çeker ve ApicUser nesnesi döndürür.
+    Hata durumunda None döner; çağıran sys.exit(1) yapar.
     """
     cmd = [
         "apic", "users:get", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
         "--user-registry", LOCAL_REGISTRY,
-        "--format", "json",
-        "--output", "-"  # Veriyi dosyaya değil, doğrudan terminale basması için
+        "--format", "json", "--output", "-",
     ]
-
     try:
-        # capture_output=True ile ekrana basılacak olan JSON'ı doğrudan yakalıyoruz
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
-
-        # Yakalanan saf metni JSON olarak parçalıyoruz
-        raw_data = json.loads(res.stdout)
-
-        # Saf veriyi ApicUser objesine (Class) bağlayıp geri döndürüyoruz
-        return ApicUser(raw_data)
-
+        return ApicUser(json.loads(res.stdout))
     except subprocess.CalledProcessError as e:
-        print("--> [HATA] APIC komutu sunucu tarafından reddedildi!")
-        print(f"--> [DETAY] {e.stderr.strip() if e.stderr else e.stdout.strip()}")
+        # APIC CLI hataları bazen stderr'de, bazen stdout'ta gelir
+        print("--> [HATA] APIC'ten kullanıcı alınamadı!")
+        print(f"--> [DETAY] {e.stderr.strip() or e.stdout.strip()}")
         return None
     except json.JSONDecodeError:
-        print("--> [HATA] APIC'ten dönen yanıt geçerli bir JSON değil!")
-        print(f"--> [GELEN YANIT] {res.stdout}")
-        return None
-    except Exception as e:
-        print(f"--> [HATA] Beklenmeyen hata: {e}")
+        print("--> [HATA] APIC yanıtı geçerli JSON değil!")
         return None
 
-def get_kc_token():
-    """Keycloak Admin Access Token alır."""
+
+# ------------------------------------------------------------------------------
+# Keycloak işlemleri
+# ------------------------------------------------------------------------------
+
+def get_kc_admin_token():
+    """
+    Keycloak master realm üzerinden admin-cli ile token alır.
+    Bu token Keycloak Admin REST API'sine erişmek için kullanılır.
+    """
     url = f"{KEYCLOAK_URL}/realms/master/protocol/openid-connect/token"
     data = urllib.parse.urlencode({
-        "username": KEYCLOAK_ADMIN_USER,
-        "password": KEYCLOAK_ADMIN_PASSWORD,
+        "username":   KEYCLOAK_ADMIN_USER,
+        "password":   KEYCLOAK_ADMIN_PASS,
         "grant_type": "password",
-        "client_id": "admin-cli"
+        "client_id":  "admin-cli",
     }).encode("utf-8")
-
-    req = urllib.request.Request(url, data=data)
     try:
-        with urllib.request.urlopen(req, context=_SSL_CTX) as response:
-            res_data = json.loads(response.read().decode())
-            return res_data.get("access_token")
+        req = urllib.request.Request(url, data=data)
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
+            return json.loads(resp.read().decode()).get("access_token")
     except Exception as e:
-        print(f"--> [HATA] Token alınamadı: {e}")
+        print(f"--> [HATA] Keycloak admin token alınamadı: {e}")
         return None
+
 
 def create_kc_user(token, user_obj):
     """
-    Keycloak üzerinde kullanıcıyı yaratır.
-    Başarılı olursa üretilen geçici şifreyi döndürür, aksi halde None döner.
+    Keycloak Admin API'si ile kullanıcıyı hedef realm'e ekler.
+
+    Geçici şifre: 16 karakterli, harf+rakam karışımı, kriptografik olarak üretilir.
+    Şifre temporary=False olarak atanır; kullanıcı ilk girişte değiştirmeye
+    zorlanmak isteniyorsa True yapılmalıdır (önerilen).
+
+    Döndürür: Başarıda geçici şifre string'i, başarısızlıkta None.
     """
     url = f"{KEYCLOAK_URL}/admin/realms/{TARGET_REALM}/users"
 
-    # 16 haneli güvenli rastgele şifre üretimi
-    alphabet = string.ascii_letters + string.digits
-    temp_pass = ''.join(secrets.choice(alphabet) for _ in range(16))
+    alphabet  = string.ascii_letters + string.digits
+    temp_pass = "".join(secrets.choice(alphabet) for _ in range(16))
 
     payload = {
-        "username": user_obj.username,
-        "enabled": True,
+        "username":      user_obj.username,
+        "enabled":       True,
         "emailVerified": True,
-        "email": user_obj.email,
-        "firstName": user_obj.first_name,
-        "lastName": user_obj.last_name,
-        "credentials": [{"type": "password", "value": temp_pass, "temporary": False}]
+        "email":         user_obj.email,
+        "firstName":     user_obj.first_name,
+        "lastName":      user_obj.last_name,
+        # temporary=True yapılırsa kullanıcı ilk girişte şifre değiştirmek zorunda kalır
+        "credentials": [{"type": "password", "value": temp_pass, "temporary": False}],
     }
 
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST"
+    )
     req.add_header("Authorization", f"Bearer {token}")
     req.add_header("Content-Type", "application/json")
 
     try:
-        with urllib.request.urlopen(req, context=_SSL_CTX) as response:
-            if response.status == 201:
-                print(f"--> [BAŞARILI] '{user_obj.username}' Keycloak'ta yaratıldı.")
+        with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
+            if resp.status == 201:
+                print(f"--> [BAŞARILI] '{user_obj.username}' Keycloak'ta oluşturuldu.")
                 return temp_pass
     except urllib.error.HTTPError as e:
         if e.code == 409:
-            print(f"--> [UYARI] Kullanıcı '{user_obj.username}' zaten mevcut!")
+            # 409 Conflict: Keycloak'ta bu username zaten kayıtlı.
+            # Bu genellikle önceki yarım kalan bir migration denemesinden kalır.
+            # Script uyarı verir ama geçici şifre döndüremez; step_03 başarısız olur.
+            print(f"--> [UYARI] '{user_obj.username}' Keycloak'ta zaten mevcut (HTTP 409).")
+            print(f"    Çözüm: Keycloak admin panelinden kullanıcıyı silin, sonra tekrar deneyin.")
         else:
-            print(f"--> [HATA] Kullanıcı yaratılamadı (HTTP {e.code})")
+            print(f"--> [HATA] Kullanıcı oluşturulamadı (HTTP {e.code}): {e.read().decode()}")
     return None
 
-# ------------------------------------------------------------------------------
-# ANA ÇALIŞMA BLOĞU
-# ------------------------------------------------------------------------------
+
 def save_temp_password(username, temp_pass):
     """
-    Üretilen geçici şifreyi migration_env.sh'a yazar.
-    04_pre_provision_shadow_user.py bu değeri oradan okuyacak.
+    Geçici şifreyi migration_env.sh'a yazar; step_03_jit_provision.py bu
+    değeri okuyarak APIC'e login eder.
+
+    ÖNEMLİ: Bu değer başarılı JIT provision'ın ardından clear_temp_password()
+    ile dosyadan silinmelidir. Başarısız senaryolarda dosyada kalabilir —
+    bu bir güvenlik riskidir; migration_env.sh izinleri 600 olmalıdır.
     """
-    key = "KC_TEMP_PASSWORD"
+    key  = "KC_TEMP_PASSWORD"
     line = f'export {key}="{temp_pass}"\n'
 
     with open(ENV_FILE, "r") as f:
         lines = f.readlines()
 
-    # Varsa eski satırı güncelle, yoksa ekle
     updated = False
     for i, l in enumerate(lines):
         if l.startswith(f"export {key}="):
             lines[i] = line
-            updated = True
+            updated   = True
             break
     if not updated:
         lines.append(line)
@@ -197,43 +243,51 @@ def save_temp_password(username, temp_pass):
     with open(ENV_FILE, "w") as f:
         f.writelines(lines)
 
-    print(f"--> [BİLGİ] Geçici şifre '{ENV_FILE}' dosyasına kaydedildi (05. script tarafından kullanılacak).")
+    print(f"--> [BİLGİ] Geçici şifre migration_env.sh'a kaydedildi (step_03 tarafından kullanılacak).")
 
+
+# ------------------------------------------------------------------------------
+# Ana akış
+# ------------------------------------------------------------------------------
 
 def main():
-    # CSV kaydı yoksa oluştur; kc_user_created=true ise bu adım zaten geçilmiş demektir
+    # Idempotency kontrolü: bu adım daha önce başarıyla tamamlandıysa atla.
     csv_row = get_user(DEMO_USERNAME)
     if csv_row and csv_row.get("kc_user_created", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{DEMO_USERNAME}' zaten Keycloak'ta mevcut (kc_user_created=true). Atlanıyor.")
-        print("==================================================")
+        print(f"--> [BİLGİ] '{DEMO_USERNAME}' zaten Keycloak'ta (kc_user_created=true). Atlanıyor.")
         return
 
-    print(f"\n--> [1/3] APIC'ten '{DEMO_USERNAME}' okunup objeye dönüştürülüyor...")
-    user_obj = get_apic_user_as_object(DEMO_USERNAME)
-
+    print(f"\n--> [1/3] APIC'ten '{DEMO_USERNAME}' kullanıcısı okunuyor...")
+    user_obj = get_apic_user(DEMO_USERNAME)
     if not user_obj:
         sys.exit(1)
 
     if not user_obj.is_valid():
-        print(f"--> [HATA] Kullanıcının Keycloak için zorunlu alanları (Email/Username) eksik!")
+        print(f"--> [HATA] Kullanıcının e-posta veya kullanıcı adı boş!")
+        print(f"    Keycloak'ta hesap açabilmek için her ikisi de zorunludur.")
         sys.exit(1)
 
-    # CSV'de kayıt yoksa şimdi oluştur (orijinal e-posta SOURCE olarak kaydediliyor)
+    # Eğer CSV'de henüz bu kullanıcı yoksa (script ilk kez çalışıyor) kaydı oluştur.
+    # target_email olarak APIC'teki mevcut e-posta kullanılır; bu adres Keycloak'a yazılır.
     if not csv_row:
         add_user(DEMO_USERNAME, CONSUMER_ORG, user_obj.email)
 
-    print("--> [2/3] Keycloak Token alınıyor...")
-    token = get_kc_token()
+    print("--> [2/3] Keycloak admin token alınıyor...")
+    token = get_kc_admin_token()
     if not token:
         sys.exit(1)
 
-    print("--> [3/3] Keycloak'a yazılıyor...")
+    print(f"--> [3/3] '{DEMO_USERNAME}' Keycloak'a yazılıyor...")
     temp_pass = create_kc_user(token, user_obj)
     if temp_pass:
         update_flag(DEMO_USERNAME, "kc_user_created", True)
-        save_temp_password(user_obj.username, temp_pass)
+        save_temp_password(DEMO_USERNAME, temp_pass)
+    else:
+        # create_kc_user başarısız oldu; hata mesajı zaten basıldı.
+        sys.exit(1)
 
     print("==================================================")
+
 
 if __name__ == "__main__":
     main()

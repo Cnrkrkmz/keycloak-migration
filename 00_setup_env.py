@@ -7,8 +7,10 @@ ENV_FILE = "migration_env.sh"
 
 def get_input_with_default(prompt_text, default_value, is_password=False):
     """
-    Kullanıcıdan veri alır. Eğer kullanıcı boş bırakıp Enter'a basarsa,
-    default_value değerini kullanır. is_password True ise girdiyi gizler.
+    Kullanıcıdan interaktif girdi alır.
+    Boş bırakılırsa default_value kullanılır.
+    is_password=True verilirse girdi ekranda görünmez (getpass).
+    Tüm prompt fonksiyonları bu helper üzerinden geçer.
     """
     if is_password:
         user_input = getpass.getpass(f"{prompt_text} [{default_value}]: ").strip()
@@ -19,8 +21,11 @@ def get_input_with_default(prompt_text, default_value, is_password=False):
 
 def setup_environment():
     """
-    Global altyapı değişkenlerini ve login bilgilerini alır,
-    diğer scriptlerin kullanabilmesi için dosyaya kaydeder.
+    Kullanıcıdan APIC ve Keycloak bağlantı bilgilerini toplar.
+    Tüm değerleri hem os.environ'a hem de migration_env.sh dosyasına
+    'export KEY="VALUE"' formatında yazar.
+    Sonraki tüm scriptler bu dosyayı okuyarak ortam değişkenlerini alır.
+    ROOT_DIR yoksa oluşturur.
     """
     print("--------------------------------------------------")
     print("ADIM 1: Global Ortam Değişkenleri Ayarlanıyor...")
@@ -51,7 +56,7 @@ def setup_environment():
     try:
         with open(ENV_FILE, "w") as f:
             f.write("#!/bin/bash\n")
-            f.write("# Bu dosya 02_setup_and_login.py scripti tarafından otomatik oluşturulmuştur.\n\n")
+            f.write("# Bu dosya 00_setup_env.py scripti tarafından otomatik oluşturulmuştur.\n\n")
             for key, value in env_vars.items():
                 f.write(f'export {key}="{value}"\n')
                 os.environ[key] = value
@@ -67,8 +72,11 @@ def setup_environment():
 
 def apic_login():
     """
-    Ortam değişkenlerindeki bilgileri kullanarak önce Client Credentials ayarlar,
-    ardından APIC CLI üzerinden otomatik sisteme giriş yapar.
+    os.environ'dan okunan APIC bilgileriyle iki adımlı login yapar:
+      1. apic client-creds:set  → credentials.json dosyasını APIC CLI'ye tanıtır
+      2. apic login             → server/realm/username/password ile oturum açar
+    Login token APIC CLI'nin kendi önbelleğine yazılır (~/.apiconnect/).
+    Sonraki scriptlerdeki tüm 'apic' komutları bu token'ı kullanır.
     """
     print("\n--------------------------------------------------")
     print("ADIM 2: API Connect (APIC) Sistemine Otomatik Giriş")

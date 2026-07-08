@@ -5,11 +5,11 @@
 CSV dosyasındaki (migration_users.csv) migrate edilmemiş kullanıcıları
 10'ar kullanıcılık batch'ler halinde işler.
 
-Her kullanıcı için sırayla şu adımları çalıştırır:
-  1. step_01_create_kc_user.py    → Keycloak'ta kullanıcı yarat
-  2. step_02_park_apic_email.py   → APIC e-postasını -old yap
-  3. step_03_jit_provision.py     → APIC JIT provision (OIDC login)
-  4. step_04_transfer_org.py      → Consumer Org sahipliğini Keycloak profiline devret
+Her kullanıcı için sırayla şu adımları çalıştırır (migration_steps.py):
+  1. step_01_create_kc_user    → Keycloak'ta kullanıcı yarat
+  2. step_02_park_apic_email   → APIC e-postasını -old yap
+  3. step_03_jit_provision     → APIC JIT provision (OIDC login)
+  4. step_04_transfer_org      → Consumer Org sahipliğini Keycloak profiline devret
 
 Her 10 kullanıcı tamamlandığında özet rapor ekrana basılır.
 Batch içinde bir kullanıcı başarısız olursa o kullanıcı atlanır
@@ -23,10 +23,15 @@ Kullanım:
 
 import os
 import sys
-import subprocess
 import argparse
 
-from migration_state import load_users, get_pending_users, print_status, write_status_report
+from migration_state import get_pending_users, write_status_report
+from migration_steps import (
+    step_01_create_kc_user,
+    step_02_park_apic_email,
+    step_03_jit_provision,
+    step_04_transfer_org,
+)
 
 ENV_FILE   = "migration_env.sh"
 BATCH_SIZE = 10
@@ -36,48 +41,32 @@ BATCH_SIZE = 10
 # YARDIMCI — Tek kullanıcı için tüm adımları çalıştır
 # ------------------------------------------------------------------------------
 
-def _run_step(script, username, step_label):
+def migrate_user(username, consumer_org="", dry_run=False):
     """
-    Bir migration adımını subprocess olarak çalıştırır.
-    Başarılıysa True, başarısızsa False döner.
-    """
-    print(f"    [{step_label}] python {script} {username} ...", end=" ", flush=True)
-    result = subprocess.run(
-        [sys.executable, script, username],
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        print("OK")
-        return True
-    else:
-        print("BAŞARISIZ")
-        # Hata detayını girintili bas
-        err = (result.stderr or result.stdout or "").strip()
-        for line in err.splitlines():
-            print(f"       {line}")
-        return False
-
-
-def migrate_user(username, dry_run=False):
-    """
-    Tek bir kullanıcı için 3 adımlı migration pipeline'ını çalıştırır.
-    dry_run=True ise hiçbir şey çalıştırmadan sadece adımları listeler.
-    Başarı True, herhangi bir adım başarısız olursa False döner.
+    Tek bir kullanıcı için 4 adımlı migration pipeline'ını sırasıyla çalıştırır.
+    Her adım migration_steps.py'den doğrudan import edilip çağrılır (subprocess yok).
+    dry_run=True ise adım adım hangi fonksiyonun çalışacağını listeler, değişiklik yapmaz.
+    Başarıda True, herhangi bir adım başarısız olursa False döner.
     """
     steps = [
-        ("step_01_create_kc_user.py",  "1/4 KC_CREATE "),
-        ("step_02_park_apic_email.py", "2/4 EMAIL_UPD "),
-        ("step_03_jit_provision.py",   "3/4 JIT_PROV  "),
-        ("step_04_transfer_org.py",    "4/4 ORG_XFER  "),
+        ("1/4 KC_CREATE ", step_01_create_kc_user,  [username, consumer_org]),
+        ("2/4 EMAIL_UPD ", step_02_park_apic_email, [username]),
+        ("3/4 JIT_PROV  ", step_03_jit_provision,   [username]),
+        ("4/4 ORG_XFER  ", step_04_transfer_org,    [username]),
     ]
 
     if dry_run:
-        for script, label in steps:
-            print(f"    [{label}] python {script} {username}  [DRY-RUN]")
+        for label, fn, _ in steps:
+            print(f"    [{label}] {fn.__name__}({username})  [DRY-RUN]")
         return True
 
-    for script, label in steps:
-        if not _run_step(script, username, label):
+    for label, fn, args in steps:
+        print(f"    [{label}] {fn.__name__}({username}) ...", end=" ", flush=True)
+        ok = fn(*args)
+        if ok:
+            print("OK")
+        else:
+            print("BAŞARISIZ")
             return False
     return True
 
@@ -120,10 +109,10 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False):
 
         for user in batch:
             username = user["username"]
-            org      = user.get("consumer_org", "-")
-            print(f"  >> {username} [{org}]")
+            org      = user.get("consumer_org", "")
+            print(f"  >> {username} [{org or '-'}]")
 
-            ok = migrate_user(username, dry_run=dry_run)
+            ok = migrate_user(username, consumer_org=org, dry_run=dry_run)
             if ok:
                 b_success += 1
                 success_ct += 1

@@ -17,8 +17,14 @@ import sys
 ENV_FILE = "migration_env.sh"
 
 def load_env():
+    """
+    migration_env.sh dosyasını okuyarak içindeki 'export KEY="VALUE"'
+    satırlarını os.environ'a yükler. Dosya yoksa hata verip çıkar.
+    Bu sayede 00_setup_env.py'nin kaydettiği tüm değişkenler
+    bu scriptte kullanılabilir hale gelir.
+    """
     if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı!")
+        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Önce 00_setup_env.py'i çalıştırın.")
         sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
@@ -36,7 +42,11 @@ LOCAL_REGISTRY = os.environ.get("LOCAL_REGISTRY", "sandbox-catalog")
 
 
 def prompt_user_details():
-    """Yeni kullanıcı bilgilerini interaktif olarak toplar."""
+    """
+    Yeni kullanıcı için username, email, ad, soyad ve şifre bilgilerini
+    interaktif olarak kullanıcıdan alır ve tuple olarak döndürür.
+    Bu değerler create_global_user() fonksiyonuna aktarılır.
+    """
     print("\n==================================================")
     print("      YENİ APIC TEST KULLANICISI OLUŞTURMA        ")
     print("==================================================")
@@ -49,7 +59,13 @@ def prompt_user_details():
 
 
 def create_global_user(username, email, first_name, last_name, password):
-    """Kullanıcıyı Local Registry üzerinde yaratır."""
+    """
+    Verilen bilgilerle APIC Local Registry'de yeni bir kullanıcı oluşturur.
+    APIC CLI'ye YAML formatında girdi verilir (stdin üzerinden).
+    Kullanıcı sadece global kullanıcı havuzuna eklenir; herhangi bir
+    Consumer Org'a atanmaz. Org ataması için 02_create_consumer_org.py kullanılır.
+    Başarılı olursa True, hata olursa False döner.
+    """
     yaml_content = f"""username: "{username}"
 email: "{email}"
 first_name: "{first_name}"
@@ -72,6 +88,11 @@ password: "{password}"
 
 
 def main():
+    """
+    prompt_user_details() ile bilgileri toplar,
+    ardından create_global_user() ile kullanıcıyı oluşturur.
+    Hata olursa çıkış kodu 1 ile sonlanır.
+    """
     username, email, first_name, last_name, password = prompt_user_details()
 
     print("\n--> İşlem başlatılıyor...")
