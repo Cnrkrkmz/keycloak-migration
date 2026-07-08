@@ -8,15 +8,6 @@ from migration_state import get_user, update_flag, mark_migrated
 
 # ==============================================================================
 # step_04_transfer_org.py — Consumer Org sahipliğini Keycloak profiline devret
-# Çalıştıran: 04_run_migration.py (adım 4/4)
-#
-# Bir Consumer Org'un sahipliğini (ve --cascade ile tüm Apps + Subscriptions'larını)
-# eski Local Registry kullanıcısından yeni Keycloak kullanıcısına devreder.
-#
-# Adımlar:
-#   1. Keycloak registry'sinde kullanıcının shadow profilini e-posta ile bul
-#   2. Shadow profili Consumer Org'a üye olarak ekle
-#   3. consumer-orgs:transfer-owner --cascade ile sahipliği devret
 # ==============================================================================
 
 ENV_FILE = "migration_env.sh"
@@ -54,7 +45,6 @@ else:
 # ------------------------------------------------------------------------------
 
 def get_consumer_org_for_user(username):
-    """CSV'den kullanıcının consumer_org değerini okur."""
     row = get_user(username)
     if row:
         return row.get("consumer_org", "")
@@ -62,10 +52,6 @@ def get_consumer_org_for_user(username):
 
 
 def get_target_email(username):
-    """
-    APIC Local Registry'den kullanıcının mevcut e-postasını okur.
-    -old suffix'i varsa çıkarıp hedef e-postayı döndürür.
-    """
     cmd = [
         "apic", "users:get", username,
         "-s", APIC_SERVER, "-o", PROV_ORG,
@@ -85,10 +71,6 @@ def get_target_email(username):
 
 
 def get_shadow_user_url(consumer_org, expected_email):
-    """
-    APIC'teki Keycloak registry'sinde e-posta ile shadow user'ı bulur.
-    Kullanıcının URL'sini döndürür.
-    """
     cmd = [
         "apic", "users:list",
         "-s", APIC_SERVER, "-o", PROV_ORG,
@@ -109,7 +91,6 @@ def get_shadow_user_url(consumer_org, expected_email):
 
 
 def add_kc_user_as_member(consumer_org, username, user_url):
-    """Shadow user'ı Consumer Org'a üye olarak ekler."""
     yaml_content = f"""name: "{username}-kc"
 title: "{username}"
 user:
@@ -136,7 +117,6 @@ user:
 
 
 def get_member_url(consumer_org, expected_email):
-    """Consumer Org içindeki shadow user'ın member URL'sini döndürür."""
     cmd = [
         "apic", "members:list", "--scope", "consumer-org",
         "-s", APIC_SERVER, "-o", PROV_ORG, "-c", CATALOG,
@@ -157,10 +137,6 @@ def get_member_url(consumer_org, expected_email):
 
 
 def transfer_ownership(consumer_org, member_url):
-    """
-    --cascade ile Consumer Org sahipliğini (Apps + Subscriptions dahil)
-    yeni Keycloak üyesine devreder.
-    """
     yaml_content = f"new_owner_member_url: {member_url}\n"
     cmd = [
         "apic", "consumer-orgs:transfer-owner", consumer_org, "-",
@@ -183,13 +159,14 @@ def transfer_ownership(consumer_org, member_url):
 def main():
     csv_row = get_user(TARGET_USERNAME)
     if not csv_row:
-        print(f"--> [HATA] '{TARGET_USERNAME}' CSV'de bulunamadı. Önce 05 scriptini çalıştırın.")
+        print(f"--> [HATA] '{TARGET_USERNAME}' CSV'de bulunamadı.")
         sys.exit(1)
 
-    if csv_row.get("migrated", "false").lower() != "true":
-        print(f"--> [HATA] '{TARGET_USERNAME}' henüz migrate edilmemiş (migrated=false).")
-        print("--> Önce 03→04→05 adımlarını tamamlayın.")
-        sys.exit(1)
+    # --- DÜZELTİLEN KISIM BURASI ---
+    # Eğer ZATEN migrate edildiyse atla. Edilmediyse (false) İŞLEME DEVAM ET!
+    if csv_row.get("migrated", "false").lower() == "true":
+        print(f"--> [BİLGİ] '{TARGET_USERNAME}' zaten migrate edilmiş (migrated=true). Atlanıyor.")
+        return
 
     consumer_org = csv_row.get("consumer_org", "")
     if not consumer_org:
@@ -205,7 +182,7 @@ def main():
     print(f"--> [2/4] Keycloak registry'de shadow user aranıyor...")
     user_url = get_shadow_user_url(consumer_org, expected_email)
     if not user_url:
-        print(f"--> [HATA] '{expected_email}' için shadow user bulunamadı. 05 scriptini kontrol edin.")
+        print(f"--> [HATA] '{expected_email}' için shadow user bulunamadı. 03 scriptini kontrol edin.")
         sys.exit(1)
 
     print(f"--> [3/4] Shadow user '{consumer_org}' org'una üye ekleniyor...")

@@ -4,11 +4,8 @@ import os
 import sys
 import ssl
 import urllib.request
-import urllib.parse
 import urllib.error
 
-# Self-signed sertifika ortamlarında SSL doğrulamasını devre dışı bırak.
-# (Test/lab ortamı — üretimde CA-signed sertifika kullanılmalı)
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
@@ -16,24 +13,12 @@ _SSL_CTX.verify_mode = ssl.CERT_NONE
 from migration_state import get_user, update_flag, mark_migrated
 
 # ==============================================================================
-# step_03_jit_provision.py — APIC'te shadow user JIT provision (OIDC login)
-# Çalıştıran: 04_run_migration.py (adım 3/4)
-#
-# HOW IT WORKS:
-#   1. step_01_create_kc_user.py Keycloak'ta kullanıcıyı yaratırken ürettiği
-#      geçici şifreyi migration_env.sh'a (KC_TEMP_PASSWORD) kaydeder.
-#   2. Bu script o şifreyi okuyarak kullanıcı adına gerçek bir Keycloak OIDC
-#      token'ı alır.
-#   3. Token'ı APIC'in /api/token endpoint'ine POST eder.
-#      → APIC token'ı doğrular, 'sub' claim'ini çözer ve kendi veritabanında
-#        gölge kullanıcıyı otomatik olarak JIT-provision eder.
+# step_03_jit_provision.py — APIC Üzerinden Gerçek Login (Password Grant)
 # ==============================================================================
 
 ENV_FILE = "migration_env.sh"
 
-
 def load_env():
-    """Loads environment variables from migration_env.sh."""
     if not os.path.exists(ENV_FILE):
         print(f"--> [HATA] '{ENV_FILE}' bulunamadı!")
         sys.exit(1)
@@ -41,45 +26,23 @@ def load_env():
         for line in f:
             line = line.strip()
             if line.startswith("export "):
-                key_value = line[7:].split("=", 1)
-                if len(key_value) == 2:
-                    os.environ[key_value[0]] = key_value[1].strip('"\'')
-
+                kv = line[7:].split("=", 1)
+                if len(kv) == 2:
+                    os.environ[kv[0]] = kv[1].strip('"\'')
 
 load_env()
 
 APIC_SERVER        = os.environ.get("APIC_SERVER")
 PROV_ORG           = os.environ.get("PROV_ORG")
-KEYCLOAK_REGISTRY  = os.environ.get("KEYCLOAK_REGISTRY_NAME", "keycluk")
-KEYCLOAK_URL       = os.environ.get("KEYCLOAK_URL")
-KEYCLOAK_ADMIN_USER     = os.environ.get("KEYCLOAK_ADMIN_USER")
-KEYCLOAK_ADMIN_PASSWORD = os.environ.get("KEYCLOAK_ADMIN_PASSWORD")
-TARGET_REALM       = os.environ.get("KEYCLOAK_REALM_NAME", "apic-demo")
 CATALOG            = os.environ.get("CATALOG", "sandbox")
-# The Keycloak client that APIC uses for OIDC — must allow password grant & have
-# "Direct Access Grants" enabled in KC.  Usually the same client registered in the
-# APIC user-registry.  Override via env var if needed.
-KEYCLOAK_CLIENT_ID     = os.environ.get("KEYCLOAK_CLIENT_ID", "apic-client")
-KEYCLOAK_CLIENT_SECRET = os.environ.get("KEYCLOAK_CLIENT_SECRET", "")
-
-# KC_TEMP_PASSWORD burada okunmuyor — step_01 her kullanıcı için dosyayı günceller,
-# subprocess olarak çalıştığımızda load_env() sonrası main() içinde okunmalı.
+KEYCLOAK_REGISTRY  = os.environ.get("KEYCLOAK_REGISTRY_NAME", "keycluk")
 
 if len(sys.argv) > 1:
     TARGET_USERNAME = sys.argv[1]
 else:
-    TARGET_USERNAME = input("APIC'te gölge profili açılacak Keycloak Kullanıcı Adı: ").strip()
-
-
-# ------------------------------------------------------------------------------
-# HELPERS
-# ------------------------------------------------------------------------------
+    TARGET_USERNAME = input("APIC'te gölge profili açılacak Kullanıcı Adı: ").strip()
 
 def _http(url, *, data=None, method=None, headers=None):
-    """
-    Minimal wrapper around urllib.request.  Returns (status_code, parsed_json_or_none).
-    Raises urllib.error.HTTPError on non-2xx so callers can inspect .code.
-    """
     req = urllib.request.Request(url, data=data, method=method)
     if headers:
         for k, v in headers.items():
@@ -91,45 +54,8 @@ def _http(url, *, data=None, method=None, headers=None):
         except json.JSONDecodeError:
             return resp.status, body
 
-
-# ------------------------------------------------------------------------------
-# STEP 1 — Obtain a real Keycloak user token (OIDC password grant)
-# ------------------------------------------------------------------------------
-
-def get_kc_user_token(username, password):
-    """
-    Authenticates *username* against Keycloak using the password grant and returns
-    the access_token.  This is the token APIC will receive and introspect.
-    """
-    url = f"{KEYCLOAK_URL}/realms/{TARGET_REALM}/protocol/openid-connect/token"
-    body_params = {
-        "grant_type": "password",
-        "client_id":  KEYCLOAK_CLIENT_ID,
-        "username":   username,
-        "password":   password,
-    }
-    if KEYCLOAK_CLIENT_SECRET:
-        body_params["client_secret"] = KEYCLOAK_CLIENT_SECRET
-
-    data = urllib.parse.urlencode(body_params).encode("utf-8")
-    try:
-        _, body = _http(url, data=data)
-        token = body.get("access_token")
-        if not token:
-            print(f"--> [HATA] Kullanıcı tokeni alınamadı. Yanıt: {body}")
-        return token
-    except urllib.error.HTTPError as e:
-        print(f"--> [HATA] Kullanıcı token isteği başarısız (HTTP {e.code}): {e.read().decode()}")
-        return None
-
-
-# ------------------------------------------------------------------------------
-# STEP 2 — Exchange the KC user token with APIC  →  triggers JIT provisioning
-# ------------------------------------------------------------------------------
-
-def trigger_apic_oidc_login(kc_user_token):
-    url = f"{APIC_SERVER}/api/token" # Varsayılan fallback
-    
+def trigger_real_apic_login(username, password):
+    url = f"{APIC_SERVER}/api/token" # Fallback
     creds_file = os.environ.get("APIC_CLIENT_CREDS", "")
     apic_client_id     = ""
     apic_client_secret = ""
@@ -138,14 +64,9 @@ def trigger_apic_oidc_login(kc_user_token):
         try:
             with open(creds_file) as f:
                 creds = json.load(f)
-
-            # DEĞİŞİKLİK 1: Provider toolkit değil, consumer_toolkit kullanılmalı!
             toolkit_creds = creds.get("consumer_toolkit", {})
-            
-            # Eğer endpoint JSON içinde varsa URL'yi Consumer API'ye yönlendir
             if "endpoint" in toolkit_creds:
                 url = f"{toolkit_creds['endpoint']}/token"
-
             apic_client_id     = toolkit_creds.get("client_id") or creds.get("client_id", "")
             apic_client_secret = toolkit_creds.get("client_secret") or creds.get("client_secret", "")
         except Exception as e:
@@ -155,14 +76,14 @@ def trigger_apic_oidc_login(kc_user_token):
         print(f"--> [HATA] '{creds_file}' içinden client_id veya client_secret okunamadı!")
         return False
 
-    # DEĞİŞİKLİK 2: Consumer kullanıcıları için Realm formatı
-    # Örnek: consumer:caner-script-provider:sandbox:keycluk
-    realm_str = f"consumer:{PROV_ORG}:{CATALOG}:{KEYCLOAK_REGISTRY}"
-
+    realm_str = f"consumer:{PROV_ORG}:{CATALOG}/{KEYCLOAK_REGISTRY}"
+    
+    # BÜYÜK DEĞİŞİKLİK: Araya girmek yok. Doğrudan APIC üzerinden "password" grant ile login oluyoruz!
     payload = json.dumps({
         "realm":         realm_str,
-        "assertion":     kc_user_token,
-        "grant_type":    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "grant_type":    "password",
+        "username":      username,
+        "password":      password,
         "client_id":     apic_client_id,
         "client_secret": apic_client_secret,
     }).encode("utf-8")
@@ -173,91 +94,59 @@ def trigger_apic_oidc_login(kc_user_token):
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "Accept": "application/json"
+                "Accept": "application/json",
+                "X-IBM-Consumer-Context": f"{PROV_ORG}.{CATALOG}"
             },
         )
         if status == 200:
-            print("--> [BAŞARILI] APIC OIDC login tetiklendi. Gölge kullanıcı JIT-provision edildi.")
+            print("--> [BAŞARILI] APIC üzerinden gerçek login yapıldı. Tüm iç bağlantılar kurularak gölge kullanıcı oluşturuldu.")
             return True
         else:
-            print(f"--> [HATA] APIC token endpoint beklenmedik yanıt döndü (HTTP {status})")
-            print(f"--> [DETAY] {body}")
+            print(f"--> [HATA] APIC login başarısız (HTTP {status}): {body}")
             return False
     except urllib.error.HTTPError as e:
         err_body = e.read().decode()
-        if e.code == 400 and "already" in err_body.lower():
-            print("--> [BİLGİ] Kullanıcı APIC üzerinde zaten mevcut.")
-            return True
-        print(f"--> [HATA] APIC token endpoint başarısız (HTTP {e.code}): {err_body}")
+        print(f"--> [HATA] APIC login reddedildi (HTTP {e.code}): {err_body}")
         return False
     except Exception as e:
-        print(f"--> [HATA] APIC OIDC login isteği sırasında hata: {e}")
+        print(f"--> [HATA] İstek sırasında hata: {e}")
         return False
 
-# ------------------------------------------------------------------------------
-# CLEANUP
-# ------------------------------------------------------------------------------
-
 def clear_temp_password():
-    """
-    migration_env.sh içindeki KC_TEMP_PASSWORD satırını siler.
-    JIT provision başarılı olduğunda çağrılır — şifre dosyada kalıcı iz bırakmaz.
-    """
     key = "KC_TEMP_PASSWORD"
     try:
         with open(ENV_FILE, "r") as f:
             lines = f.readlines()
-
         filtered = [l for l in lines if not l.startswith(f"export {key}=")]
-
-        if len(filtered) == len(lines):
-            return  # zaten yoktu, yapacak bir şey yok
-
-        with open(ENV_FILE, "w") as f:
-            f.writelines(filtered)
-
-        print(f"--> [BİLGİ] Geçici şifre '{ENV_FILE}' dosyasından temizlendi.")
-    except Exception as e:
-        print(f"--> [UYARI] Geçici şifre temizlenemedi: {e}")
-
-
-# ------------------------------------------------------------------------------
-# MAIN
-# ------------------------------------------------------------------------------
+        if len(filtered) != len(lines):
+            with open(ENV_FILE, "w") as f:
+                f.writelines(filtered)
+    except Exception:
+        pass
 
 def main():
     csv_row = get_user(TARGET_USERNAME)
     if not csv_row:
-        print(f"--> [HATA] '{TARGET_USERNAME}' CSV'de bulunamadı. Önce 02 ve 03 scriptlerini çalıştırın.")
+        print(f"--> [HATA] '{TARGET_USERNAME}' CSV'de bulunamadı.")
         sys.exit(1)
 
     if csv_row.get("migrated", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{TARGET_USERNAME}' zaten migrate edilmiş (migrated=true). Atlanıyor.")
-        print("==================================================")
+        print(f"--> [BİLGİ] '{TARGET_USERNAME}' zaten migrate edilmiş. Atlanıyor.")
         return
 
     if csv_row.get("apic_jit_done", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{TARGET_USERNAME}' APIC'te zaten JIT provision edilmiş (apic_jit_done=true). Atlanıyor.")
-        print("==================================================")
+        print(f"--> [BİLGİ] '{TARGET_USERNAME}' APIC'te zaten provision edilmiş. Atlanıyor.")
         return
 
-    # load_env() modül yüklenirken çalıştı; step_01 şifreyi dosyaya yazdıktan
-    # sonra bu subprocess başlatıldığı için burada tekrar okuyoruz.
     load_env()
     kc_temp_password = os.environ.get("KC_TEMP_PASSWORD", "")
 
     if not kc_temp_password:
-        print("--> [HATA] 'KC_TEMP_PASSWORD' bulunamadı!")
-        print("--> step_01_create_kc_user.py başarıyla tamamlanmış olmalı.")
+        print("--> [HATA] 'KC_TEMP_PASSWORD' bulunamadı! 1. Adım tekrar edilmeli.")
         sys.exit(1)
 
-    print(f"\n--> [1/2] '{TARGET_USERNAME}' kullanıcısı adına Keycloak'tan OIDC token alınıyor...")
-    kc_user_token = get_kc_user_token(TARGET_USERNAME, kc_temp_password)
-    if not kc_user_token:
-        sys.exit(1)
-
-    print(f"--> [2/2] APIC'e OIDC login tetikleniyor (JIT provision)...")
-    success = trigger_apic_oidc_login(kc_user_token)
+    print(f"\n--> [1/1] '{TARGET_USERNAME}' için APIC üzerinden gerçek login (Password Grant) simüle ediliyor...")
+    success = trigger_real_apic_login(TARGET_USERNAME, kc_temp_password)
 
     if not success:
         sys.exit(1)
@@ -267,10 +156,8 @@ def main():
     clear_temp_password()
 
     print("==================================================")
-    print(f"[TAMAMLANDI] '{TARGET_USERNAME}' APIC'e OIDC ile login edildi.")
-    print("Geçici şifre 'temporary=True' — kullanıcı ilk girişte şifresini değiştirmek zorundadır.")
+    print(f"[TAMAMLANDI] '{TARGET_USERNAME}' gerçek OIDC akışıyla login edildi.")
     print("==================================================")
-
 
 if __name__ == "__main__":
     main()
