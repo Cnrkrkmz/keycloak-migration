@@ -16,9 +16,11 @@ Batch içinde bir kullanıcı başarısız olursa o kullanıcı atlanır
 (migrated=false kalır) ve bir sonrakiyle devam edilir.
 
 Kullanım:
-  python 04_run_migration.py                    # tüm pending kullanıcılar
-  python 04_run_migration.py --batch-size 5     # özel batch boyutu
-  python 04_run_migration.py --dry-run          # adımları yazdır, çalıştırma
+  python 04_run_migration.py                          # tüm pending kullanıcılar
+  python 04_run_migration.py --batch-size 5           # özel batch boyutu
+  python 04_run_migration.py --limit 2                # ilk 2 kullanıcıyı migrate et
+  python 04_run_migration.py --username ali veli      # sadece belirli kullanıcılar
+  python 04_run_migration.py --dry-run                # adımları yazdır, çalıştırma
 """
 
 import os
@@ -75,13 +77,36 @@ def migrate_user(username, consumer_org="", dry_run=False):
 # ANA BATCH DÖNGÜSÜ
 # ------------------------------------------------------------------------------
 
-def run_batch(batch_size=BATCH_SIZE, dry_run=False):
+def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None):
+    """
+    CSV'deki pending kullanıcıları batch'ler halinde migrate eder.
+
+    limit    : işlenecek maksimum kullanıcı sayısı (None = sınırsız)
+    usernames: sadece bu kullanıcı adları işlenir (None = hepsi)
+    İkisi birlikte verilebilir; önce username filtresi, sonra limit uygulanır.
+    """
     pending = get_pending_users()
 
     if not pending:
         print("--> [BİLGİ] Migration gereken kullanıcı yok.")
         rpt = write_status_report()
         print(f"--> [BİLGİ] Güncel durum: {rpt}")
+        return
+
+    # --username filtresi
+    if usernames:
+        username_set = set(usernames)
+        not_found    = username_set - {u["username"] for u in pending}
+        if not_found:
+            print(f"--> [UYARI] Şu kullanıcılar CSV'de yok veya zaten migrate edilmiş: {', '.join(sorted(not_found))}")
+        pending = [u for u in pending if u["username"] in username_set]
+
+    # --limit filtresi
+    if limit is not None and limit > 0:
+        pending = pending[:limit]
+
+    if not pending:
+        print("--> [BİLGİ] Filtre sonrası işlenecek kullanıcı kalmadı.")
         return
 
     total      = len(pending)
@@ -93,6 +118,10 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False):
     print(f"  BATCH MİGRASYON BAŞLADI")
     print(f"  Toplam kullanıcı : {total}")
     print(f"  Batch boyutu     : {batch_size}")
+    if limit is not None:
+        print(f"  Limit            : {limit}")
+    if usernames:
+        print(f"  Filtre           : {', '.join(usernames)}")
     if dry_run:
         print("  MOD              : DRY-RUN (hiçbir şey değiştirilmez)")
     print(f"{'='*60}\n")
@@ -158,6 +187,20 @@ if __name__ == "__main__":
         "--dry-run", action="store_true",
         help="Adımları listele, gerçekten çalıştırma"
     )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="İşlenecek maksimum kullanıcı sayısı (varsayılan: sınırsız)"
+    )
+    parser.add_argument(
+        "--username", nargs="+", dest="usernames", default=None,
+        metavar="USERNAME",
+        help="Sadece belirtilen kullanıcıları migrate et (boşlukla ayırarak birden fazla verilebilir)"
+    )
     args = parser.parse_args()
 
-    run_batch(batch_size=args.batch_size, dry_run=args.dry_run)
+    run_batch(
+        batch_size=args.batch_size,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        usernames=args.usernames,
+    )

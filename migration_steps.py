@@ -128,6 +128,8 @@ class _ApicUser:
 def _get_apic_user(username):
     """
     APIC Local Registry'den kullanıcıyı JSON olarak çeker ve _ApicUser nesnesi döndürür.
+    username, CSV'deki değerden gelir — 03_export_consumer_orgs.py user["name"] alanını
+    (case-preserved) CSV'ye yazarından bu değer doğrudan APIC CLI'ye geçilir.
     CLI hataları bazen stderr'de, bazen stdout'ta gelir; her ikisi de kontrol edilir.
     Hata durumunda None döner.
     """
@@ -415,22 +417,51 @@ def step_02_park_apic_email(username):
 
 
 # ==============================================================================
-# ADIM 3 — APIC JIT Provision
+# ADIM 3 — APIC JIT Provision (JWT-Bearer Token Exchange)
 # ==============================================================================
 
-def _trigger_apic_jit_login(username, password):
+def _get_kc_access_token(username, password):
     """
-    APIC consumer token endpoint'ine 'password' grant type ile login isteği atar.
+    Kullanıcının geçici şifresiyle Keycloak'tan Access Token alır.
+    Bu token sonraki adımda APIC'e JWT-Bearer assertion olarak sunulur.
+    KEYCLOAK_CLIENT_ID: APIC'in Keycloak'ta kayıtlı OIDC client'ı.
+    Başarıda access_token string'i, hata durumunda None döner.
+    """
+    target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
+    kc_client_id = _get_env("KEYCLOAK_CLIENT_ID", "apic-client")
+    url = f"{_get_env('KEYCLOAK_URL')}/realms/{target_realm}/protocol/openid-connect/token"
 
-    APIC bu isteği aldığında:
-      1. Keycloak'a username/password ile doğrulama yapar.
-      2. Keycloak'tan kullanıcının var olduğunu onaylar.
-      3. Kendi veritabanında shadow user kaydını açar (JIT provision).
-      4. Bir APIC access token döndürür.
+    body_params = {
+        "grant_type": "password",
+        "client_id":  kc_client_id,
+        "username":   username,
+        "password":   password,
+        "scope":      "openid email profile",
+    }
+    data = urllib.parse.urlencode(body_params).encode("utf-8")
+    try:
+        _, body = _http(url, data=data)
+        token = body.get("access_token")
+        if not token:
+            print(f"--> [HATA] Access Token alınamadı: {body}")
+        return token
+    except urllib.error.HTTPError as e:
+        print(f"--> [HATA] KC token isteği başarısız (HTTP {e.code}): {e.read().decode()}")
+        return None
+
+
+def _trigger_apic_jwt_bearer(access_token):
+    """
+    Keycloak'tan alınan Access Token'ı APIC'e JWT-Bearer grant olarak sunar.
+
+    Akış:
+      1. Keycloak'tan alınan access_token, APIC'e 'assertion' alanında gönderilir.
+      2. APIC token'ı Keycloak'a doğrulattırır.
+      3. APIC kendi veritabanında shadow user kaydını açar (JIT provision).
+         Bunun çalışması için APIC'teki Keycloak registry'sinde
+         "Auto onboard" (otomatik kayıt) özelliğinin açık olması gerekir.
 
     Realm formatı: consumer:<prov_org>:<catalog>/<keycloak_registry_adi>
-    Bu format APIC'e hangi catalog'daki hangi OIDC registry'nin kullanılacağını söyler.
-
     Başarıda True, hata durumunda False döner.
     """
     apic_server       = _get_env("APIC_SERVER")
@@ -457,16 +488,15 @@ def _trigger_apic_jit_login(username, password):
             print(f"--> [UYARI] credentials.json okunamadı: {e}")
 
     if not apic_client_id or not apic_client_secret:
-        print(f"--> [HATA] client_id veya client_secret bulunamadı!")
+        print(f"--> [HATA] APIC client_id veya client_secret bulunamadı!")
         print(f"    credentials.json dosyasını ve APIC_CLIENT_CREDS yolunu kontrol edin.")
         return False
 
     realm_str = f"consumer:{prov_org}:{catalog}/{kc_registry}"
     payload = json.dumps({
         "realm":         realm_str,
-        "grant_type":    "password",
-        "username":      username,
-        "password":      password,
+        "grant_type":    "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion":     access_token,
         "client_id":     apic_client_id,
         "client_secret": apic_client_secret,
     }).encode("utf-8")
@@ -484,13 +514,17 @@ def _trigger_apic_jit_login(username, password):
             },
         )
         if status == 200:
-            print("--> [BAŞARILI] APIC login tamamlandı. Shadow user oluşturuldu (JIT provision).")
+            print("--> [BAŞARILI] APIC JIT-provisioning (Auto Onboard) tamamlandı.")
             return True
         else:
             print(f"--> [HATA] APIC login başarısız (HTTP {status}): {body}")
             return False
     except urllib.error.HTTPError as e:
-        print(f"--> [HATA] APIC login reddedildi (HTTP {e.code}): {e.read().decode()}")
+        err_body = e.read().decode()
+        if e.code == 400 and "already" in err_body.lower():
+            print("--> [BİLGİ] Kullanıcı APIC üzerinde zaten mevcut.")
+            return True
+        print(f"--> [HATA] APIC login reddedildi (HTTP {e.code}): {err_body}")
         return False
     except Exception as e:
         print(f"--> [HATA] İstek sırasında beklenmeyen hata: {e}")
@@ -518,23 +552,25 @@ def _clear_temp_password():
 
 def step_03_jit_provision(username):
     """
-    Migration Adım 3/4 — APIC JIT Provision
+    Migration Adım 3/4 — APIC JIT Provision (JWT-Bearer Token Exchange)
 
     Keycloak'ta oluşturulmuş kullanıcıyı APIC'e tanıtır (shadow user kaydı açar).
 
     1. CSV'de migrated/apic_jit_done=true ise atlar (idempotent).
     2. migration_env.sh'dan KC_TEMP_PASSWORD'ü taze okur
        (step_01 bu süreçte diske yazdı; taze okuma şart).
-    3. _trigger_apic_jit_login() ile APIC consumer endpoint'ine login atar.
-    4. CSV → apic_jit_done=true, migrated=true yazar.
-    5. _clear_temp_password() ile geçici şifreyi temizler.
+    3. _get_kc_access_token() ile Keycloak'tan Access Token alır.
+    4. _trigger_apic_jwt_bearer() ile token'ı APIC'e JWT-Bearer olarak sunar.
+    5. CSV → apic_jit_done=true, migrated=true yazar.
+    6. _clear_temp_password() ile geçici şifreyi temizler.
 
     Döner: başarıda True, hata durumunda False.
 
     Müşteri Hataları:
       KC_TEMP_PASSWORD bulunamadı → step_01 başarısız olmuş, Keycloak'tan elle şifre belirleyin.
-      HTTP 401 → APIC client credentials geçersiz.
-      HTTP 400 → Realm string formatı yanlış (consumer:<org>:<catalog>/<registry>).
+      KC token 401 → client_id yanlış veya kullanıcı Keycloak'ta yok.
+      APIC 401 → APIC client credentials geçersiz.
+      APIC 400 → Realm string formatı yanlış veya Auto Onboard kapalı.
     """
     load_env()  # KC_TEMP_PASSWORD step_01 tarafından az önce yazıldı; taze okuma şart
     csv_row = get_user(username)
@@ -558,20 +594,24 @@ def step_03_jit_provision(username):
         print("    migration_env.sh'a 'export KC_TEMP_PASSWORD=\"şifre\"' ekleyebilirsiniz.")
         return False
 
-    print(f"\n--> [1/1] '{username}' için APIC consumer login tetikleniyor (JIT provision)...")
-    success = _trigger_apic_jit_login(username, kc_temp_password)
+    print(f"\n--> [1/2] '{username}' için Keycloak'tan Access Token alınıyor...")
+    access_token = _get_kc_access_token(username, kc_temp_password)
+    if not access_token:
+        return False
+
+    print(f"--> [2/2] APIC'e JWT-Bearer token gönderiliyor (JIT Provision)...")
+    success = _trigger_apic_jwt_bearer(access_token)
     if not success:
         return False
 
     update_flag(username, "apic_jit_done", True)
-    mark_migrated(username)
+    
     _clear_temp_password()
 
     print("==================================================")
     print(f"[TAMAMLANDI] '{username}' APIC'e Keycloak üzerinden login edildi.")
     print("==================================================")
     return True
-
 
 # ==============================================================================
 # ADIM 4 — Consumer Org Sahipliğini Devret

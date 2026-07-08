@@ -170,12 +170,15 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
             print(f"--> [BİLGİ] '{consumer_org_name}' zaten Keycloak kullanıcısına ait. Atlanıyor.")
             return None
         if owner_url and user.get("url") == owner_url:
-            return {"username": user.get("username", ""), "email": user.get("email", "")}
+            # APIC'in "name" alanı users:get komutuna verilmesi gereken case-preserved
+            # değerdir. "username" küçük harfe normalize edilmiş olabilir ve
+            # users:get ile sorgulandığında "Not found" hatasına neden olur.
+            return {"username": user.get("name") or user.get("username", ""), "email": user.get("email", "")}
 
     for member in items:
         user = member.get("user", {})
         if member.get("role", "") == "owner":
-            return {"username": user.get("username", ""), "email": user.get("email", "")}
+            return {"username": user.get("name") or user.get("username", ""), "email": user.get("email", "")}
 
     print(f"--> [UYARI] '{consumer_org_name}' için owner üye bulunamadı.")
     return None
