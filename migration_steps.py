@@ -429,11 +429,14 @@ def _get_kc_access_token(username, password):
     """
     target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
     kc_client_id = _get_env("KEYCLOAK_CLIENT_ID", "apic-client")
+    kc_client_secret = _get_env("KEYCLOAK_CLIENT_SECRET", "")
+
     url = f"{_get_env('KEYCLOAK_URL')}/realms/{target_realm}/protocol/openid-connect/token"
 
     body_params = {
         "grant_type": "password",
         "client_id":  kc_client_id,
+        "client_secret": kc_client_secret,
         "username":   username,
         "password":   password,
         "scope":      "openid email profile",
