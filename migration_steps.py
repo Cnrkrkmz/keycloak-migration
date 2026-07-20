@@ -1,35 +1,35 @@
 #!/usr/bin/env python3.11
 """
-migration_steps.py — Migration Pipeline: 4 Adım (Tek Dosya)
-=============================================================
-Çalıştıran : 04_run_migration.py (import ederek doğrudan çağırır)
-             Tek kullanıcı testi için: python migration_steps.py <username>
+migration_steps.py — Migration Pipeline: 4 Steps (Single File)
+===============================================================
+Called by : 04_run_migration.py (imported and called directly)
+             For single-user testing: python migration_steps.py <username>
 
-İçerdiği Adımlar:
+Steps included:
   step_01_create_kc_user(username, consumer_org)
-      Keycloak'ta kullanıcıyı oluşturur. Geçici şifreyi migration_env.sh'a yazar.
+      Creates the user in Keycloak. Writes the temporary password to migration_env.sh.
       CSV → kc_user_created = true
 
   step_02_park_apic_email(username)
-      APIC'teki e-postayı <adres>-old@<domain> yaparak park eder.
-      CSV → apic_email_parked = true, source_email = <park adresi>
+      Parks the APIC email by appending -old@<domain> to the address.
+      CSV → apic_email_parked = true, source_email = <parked address>
 
   step_03_jit_provision(username)
-      APIC consumer token endpoint'e password grant ile login atar;
-      APIC kendi veritabanında Keycloak shadow user kaydını açar (JIT).
+      Logs in to the APIC consumer token endpoint via password grant;
+      APIC opens a Keycloak shadow user record in its own database (JIT).
       CSV → apic_jit_done = true, migrated = true
-      ENV → KC_TEMP_PASSWORD temizlenir
+      ENV → KC_TEMP_PASSWORD is cleared
 
   step_04_transfer_org(username)
-      Consumer Org sahipliğini Local Registry kullanıcısından
-      Keycloak shadow user'a devret (--cascade).
+      Transfers Consumer Org ownership from the Local Registry user
+      to the Keycloak shadow user (--cascade).
       CSV → org_owner_xfrd = true, migrated = true
 
-Müşteri Ortamında Sık Karşılaşılan Hatalar (genel):
-  - 'apic' CLI bulunamadı → PATH'e APIC Toolkit ekleyin.
-  - Token alınamadı / 401 → 00_setup_env.py'yi yeniden çalıştırın.
-  - SSL: CERTIFICATE_VERIFY_FAILED → Prod ortamda CA bundle gerekli.
-    Bu dosyadaki _SSL_CTX bloğunu güncelleyin.
+Common Errors in Customer Environments (general):
+  - 'apic' CLI not found → Add APIC Toolkit to PATH.
+  - Could not obtain token / 401 → Re-run 00_setup_env.py.
+  - SSL: CERTIFICATE_VERIFY_FAILED → CA bundle required in production.
+    Update the _SSL_CTX block in this file.
 """
 
 import subprocess
@@ -43,8 +43,8 @@ import urllib.parse
 import secrets
 import string
 
-# Lab/test ortamı için SSL doğrulaması devre dışı.
-# Üretimde: _SSL_CTX = ssl.create_default_context(cafile="/path/to/ca-bundle.crt")
+# SSL verification disabled for lab/test environment.
+# In production: _SSL_CTX = ssl.create_default_context(cafile="/path/to/ca-bundle.crt")
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode    = ssl.CERT_NONE
@@ -55,18 +55,18 @@ ENV_FILE = "migration_env.sh"
 
 
 # ==============================================================================
-# ORTAK YARDIMCILAR
+# COMMON HELPERS
 # ==============================================================================
 
 def load_env():
     """
-    migration_env.sh dosyasını okuyarak 'export KEY="VALUE"' satırlarını
-    os.environ'a yükler. Her adım kendi kritik değerini okumadan önce
-    bu fonksiyonu çağırmalıdır (özellikle step_03, KC_TEMP_PASSWORD için).
-    Dosya yoksa hata verip sys.exit(1) yapar.
+    Reads migration_env.sh and loads 'export KEY="VALUE"' lines into os.environ.
+    Each step must call this before reading its critical values
+    (especially step_03, which needs KC_TEMP_PASSWORD).
+    Exits via sys.exit(1) if the file is not found.
     """
     if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Lütfen önce 00_setup_env.py'yi çalıştırın.")
+        print(f"--> [ERROR] '{ENV_FILE}' not found! Please run 00_setup_env.py first.")
         sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
@@ -79,17 +79,17 @@ def load_env():
 
 def _get_env(key, default=""):
     """
-    os.environ'dan değer okur. load_env() sonrası çağrılmalıdır.
-    Modül yükleme zamanında değil, fonksiyon çağrısı zamanında okunur;
-    böylece 04_run_migration.py içinde load_env() sonrası değerler güncel kalır.
+    Reads a value from os.environ. Must be called after load_env().
+    Values are read at function call time, not at module load time;
+    this keeps values up to date after load_env() is called inside 04_run_migration.py.
     """
     return os.environ.get(key, default)
 
 
 def _http(url, *, data=None, method=None, headers=None):
     """
-    Minimal urllib wrapper. (status_code, parsed_body) döndürür.
-    Non-2xx durumlarda urllib.error.HTTPError fırlatır.
+    Minimal urllib wrapper. Returns (status_code, parsed_body).
+    Raises urllib.error.HTTPError on non-2xx responses.
     """
     req = urllib.request.Request(url, data=data, method=method)
     if headers:
@@ -104,15 +104,15 @@ def _http(url, *, data=None, method=None, headers=None):
 
 
 # ==============================================================================
-# ADIM 1 — Keycloak'ta Kullanıcı Oluşturma
+# STEP 1 — Create User in Keycloak
 # ==============================================================================
 
 class _ApicUser:
     """
-    APIC'ten gelen ham JSON verisini alıp migration için gerekli
-    alanları tutan sade bir nesneye dönüştürür.
-    APIC bazı versiyonlarda snake_case, bazılarında camelCase döndürür;
-    her ikisini de destekler.
+    Takes raw JSON data from APIC and converts it into a simple object
+    holding the fields required for migration.
+    APIC returns snake_case in some versions and camelCase in others;
+    both are supported.
     """
     def __init__(self, raw):
         self.username   = raw.get("username") or raw.get("name") or ""
@@ -121,17 +121,17 @@ class _ApicUser:
         self.last_name  = raw.get("last_name")  or raw.get("lastName")  or ""
 
     def is_valid(self):
-        """Keycloak'ta hesap açmak için en az username ve email zorunludur."""
+        """At minimum, username and email are required to create an account in Keycloak."""
         return bool(self.username and self.email)
 
 
 def _get_apic_user(username):
     """
-    APIC Local Registry'den kullanıcıyı JSON olarak çeker ve _ApicUser nesnesi döndürür.
-    username, CSV'deki değerden gelir — 03_export_consumer_orgs.py user["name"] alanını
-    (case-preserved) CSV'ye yazarından bu değer doğrudan APIC CLI'ye geçilir.
-    CLI hataları bazen stderr'de, bazen stdout'ta gelir; her ikisi de kontrol edilir.
-    Hata durumunda None döner.
+    Fetches a user as JSON from the APIC Local Registry and returns an _ApicUser object.
+    username comes from the CSV — 03_export_consumer_orgs.py writes user["name"]
+    (case-preserved) to the CSV, so this value is passed directly to the APIC CLI.
+    CLI errors sometimes appear in stderr and sometimes in stdout; both are checked.
+    Returns None on error.
     """
     cmd = [
         "apic", "users:get", username,
@@ -143,18 +143,18 @@ def _get_apic_user(username):
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return _ApicUser(json.loads(res.stdout))
     except subprocess.CalledProcessError as e:
-        print("--> [HATA] APIC'ten kullanıcı alınamadı!")
-        print(f"--> [DETAY] {e.stderr.strip() or e.stdout.strip()}")
+        print("--> [ERROR] Failed to retrieve user from APIC!")
+        print(f"--> [DETAIL] {e.stderr.strip() or e.stdout.strip()}")
         return None
     except json.JSONDecodeError:
-        print("--> [HATA] APIC yanıtı geçerli JSON değil!")
+        print("--> [ERROR] APIC response is not valid JSON!")
         return None
 
 
 def _get_kc_admin_token():
     """
-    Keycloak master realm üzerinden admin-cli ile token alır.
-    Bu token Keycloak Admin REST API'sine yapılacak tüm isteklerde kullanılır.
+    Obtains a token from the Keycloak master realm via admin-cli.
+    This token is used in all requests to the Keycloak Admin REST API.
     """
     kc_url = _get_env("KEYCLOAK_URL")
     url = f"{kc_url}/realms/master/protocol/openid-connect/token"
@@ -169,16 +169,16 @@ def _get_kc_admin_token():
         with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode()).get("access_token")
     except Exception as e:
-        print(f"--> [HATA] Keycloak admin token alınamadı: {e}")
+        print(f"--> [ERROR] Failed to obtain Keycloak admin token: {e}")
         return None
 
 
 def _create_kc_user_api(token, user_obj):
     """
-    Keycloak Admin API'si ile kullanıcıyı hedef realm'e (KEYCLOAK_REALM_NAME) ekler.
-    16 karakterli kriptografik rastgele geçici şifre üretir ve credentials'a yazar.
-    HTTP 409: kullanıcı zaten mevcutsa uyarı verir (None döner; step_01 başarısız sayılır).
-    Başarıda geçici şifre string'i, başarısızlıkta None döner.
+    Adds the user to the target realm (KEYCLOAK_REALM_NAME) via the Keycloak Admin API.
+    Generates a 16-character cryptographically random temporary password and writes it to credentials.
+    HTTP 409: warns if the user already exists (returns None; step_01 is considered failed).
+    Returns the temporary password string on success, None on failure.
     """
     target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
     url = f"{_get_env('KEYCLOAK_URL')}/admin/realms/{target_realm}/users"
@@ -193,7 +193,7 @@ def _create_kc_user_api(token, user_obj):
         "email":         user_obj.email,
         "firstName":     user_obj.first_name,
         "lastName":      user_obj.last_name,
-        # temporary=True yapılırsa kullanıcı ilk girişte şifre değiştirmek zorunda kalır
+        # If temporary=True, the user is forced to change their password on first login
         "credentials": [{"type": "password", "value": temp_pass, "temporary": False}],
     }
 
@@ -206,23 +206,23 @@ def _create_kc_user_api(token, user_obj):
     try:
         with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             if resp.status == 201:
-                print(f"--> [BAŞARILI] '{user_obj.username}' Keycloak'ta oluşturuldu.")
+                print(f"--> [SUCCESS] '{user_obj.username}' created in Keycloak.")
                 return temp_pass
     except urllib.error.HTTPError as e:
         if e.code == 409:
-            print(f"--> [UYARI] '{user_obj.username}' Keycloak'ta zaten mevcut (HTTP 409).")
-            print(f"    Çözüm: Keycloak admin panelinden kullanıcıyı silin, sonra tekrar deneyin.")
+            print(f"--> [WARNING] '{user_obj.username}' already exists in Keycloak (HTTP 409).")
+            print(f"    Solution: Delete the user from the Keycloak admin panel and try again.")
         else:
-            print(f"--> [HATA] Kullanıcı oluşturulamadı (HTTP {e.code}): {e.read().decode()}")
+            print(f"--> [ERROR] Failed to create user (HTTP {e.code}): {e.read().decode()}")
     return None
 
 
 def _save_temp_password(temp_pass):
     """
-    Geçici şifreyi migration_env.sh'a yazar; step_03 bu değeri okuyarak
-    APIC consumer token endpoint'ine login eder.
-    Dosyada KC_TEMP_PASSWORD zaten varsa üzerine yazar, yoksa sona ekler.
-    Başarılı JIT provision sonrası _clear_temp_password() ile temizlenir.
+    Writes the temporary password to migration_env.sh; step_03 reads this value
+    to log in to the APIC consumer token endpoint.
+    Overwrites KC_TEMP_PASSWORD if it already exists in the file, otherwise appends it.
+    Cleared by _clear_temp_password() after successful JIT provision.
     """
     key  = "KC_TEMP_PASSWORD"
     line = f'export {key}="{temp_pass}"\n'
@@ -238,50 +238,50 @@ def _save_temp_password(temp_pass):
         lines.append(line)
     with open(ENV_FILE, "w") as f:
         f.writelines(lines)
-    print(f"--> [BİLGİ] Geçici şifre migration_env.sh'a kaydedildi (step_03 tarafından kullanılacak).")
+    print(f"--> [INFO] Temporary password saved to migration_env.sh (will be used by step_03).")
 
 
 def step_01_create_kc_user(username, consumer_org=""):
     """
-    Migration Adım 1/4 — Keycloak'ta Kullanıcı Oluşturma
+    Migration Step 1/4 — Create User in Keycloak
 
-    1. CSV'de kc_user_created=true ise idempotent olarak atlar.
-    2. APIC Local Registry'den kullanıcı bilgilerini çeker.
-    3. Keycloak Admin API ile hedef realm'e kullanıcıyı ekler.
-    4. Üretilen geçici şifreyi migration_env.sh'a yazar (step_03 okur).
-    5. CSV'de kc_user_created=true olarak işaretler.
+    1. Skips idempotently if kc_user_created=true in CSV.
+    2. Fetches user details from the APIC Local Registry.
+    3. Adds the user to the target realm via the Keycloak Admin API.
+    4. Writes the generated temporary password to migration_env.sh (read by step_03).
+    5. Marks kc_user_created=true in the CSV.
 
-    Döner: başarıda True, hata/atlanmada False.
+    Returns: True on success, False on error/skip.
 
-    Müşteri Hataları:
-      HTTP 409 → Keycloak'ta aynı username zaten var, önce silin.
-      Token alınamadı → Keycloak admin bilgilerini doğrulayın.
+    Common Errors:
+      HTTP 409 → Same username already exists in Keycloak, delete it first.
+      Could not obtain token → Verify Keycloak admin credentials.
     """
     load_env()
     csv_row = get_user(username)
     if csv_row and csv_row.get("kc_user_created", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{username}' zaten Keycloak'ta (kc_user_created=true). Atlanıyor.")
+        print(f"--> [INFO] '{username}' already exists in Keycloak (kc_user_created=true). Skipping.")
         return True
 
-    print(f"\n--> [1/3] APIC'ten '{username}' kullanıcısı okunuyor...")
+    print(f"\n--> [1/3] Reading user '{username}' from APIC...")
     user_obj = _get_apic_user(username)
     if not user_obj:
         return False
 
     if not user_obj.is_valid():
-        print(f"--> [HATA] Kullanıcının e-posta veya kullanıcı adı boş!")
-        print(f"    Keycloak'ta hesap açabilmek için her ikisi de zorunludur.")
+        print(f"--> [ERROR] User's email or username is empty!")
+        print(f"    Both are required to create an account in Keycloak.")
         return False
 
     if not csv_row:
         add_user(username, consumer_org, user_obj.email)
 
-    print("--> [2/3] Keycloak admin token alınıyor...")
+    print("--> [2/3] Obtaining Keycloak admin token...")
     token = _get_kc_admin_token()
     if not token:
         return False
 
-    print(f"--> [3/3] '{username}' Keycloak'a yazılıyor...")
+    print(f"--> [3/3] Writing '{username}' to Keycloak...")
     temp_pass = _create_kc_user_api(token, user_obj)
     if not temp_pass:
         return False
@@ -293,14 +293,14 @@ def step_01_create_kc_user(username, consumer_org=""):
 
 
 # ==============================================================================
-# ADIM 2 — APIC E-postasını Park Et
+# STEP 2 — Park APIC Email
 # ==============================================================================
 
 def _get_current_user_data(username):
     """
-    APIC Local Registry'den kullanıcının güncel bilgilerini çeker (JSON).
-    E-postanın -old@ içerip içermediğini ve isim alanlarını buradan öğreniriz.
-    Hata durumunda None döner.
+    Fetches the current details of a user from the APIC Local Registry (JSON).
+    This is where we learn whether the email contains -old@ and what the name fields are.
+    Returns None on error.
     """
     cmd = [
         "apic", "users:get", username,
@@ -312,19 +312,19 @@ def _get_current_user_data(username):
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return json.loads(res.stdout)
     except subprocess.CalledProcessError as e:
-        print(f"--> [HATA] APIC kullanıcısı okunamadı: {e.stderr.strip() or e.stdout.strip()}")
+        print(f"--> [ERROR] Failed to read APIC user: {e.stderr.strip() or e.stdout.strip()}")
         return None
     except json.JSONDecodeError:
-        print("--> [HATA] APIC yanıtı geçerli JSON değil!")
+        print("--> [ERROR] APIC response is not valid JSON!")
         return None
 
 
 def _update_user_email(username, current_data, new_email):
     """
-    APIC Local Registry'de kullanıcının e-postasını günceller.
-    first_name ve last_name mevcut değerleri korunarak gönderilir;
-    APIC bu alanları boş gönderince sıfırlayabilir.
-    Başarıda True, CLI hatasında False döner.
+    Updates the user's email in the APIC Local Registry.
+    Current first_name and last_name values are preserved in the request;
+    APIC may reset them if sent as empty.
+    Returns True on success, False on CLI error.
     """
     first_name = current_data.get("first_name") or current_data.get("firstName") or ""
     last_name  = current_data.get("last_name")  or current_data.get("lastName")  or ""
@@ -342,74 +342,74 @@ title: {username}
         subprocess.run(cmd, input=yaml_content, capture_output=True, text=True, check=True)
         return True
     except subprocess.CalledProcessError as e:
-        print("--> [HATA] APIC güncelleme reddedildi!")
-        print(f"--> [DETAY] {e.stderr.strip() or e.stdout.strip()}")
+        print("--> [ERROR] APIC update was rejected!")
+        print(f"--> [DETAIL] {e.stderr.strip() or e.stdout.strip()}")
         return False
 
 
 def step_02_park_apic_email(username):
     """
-    Migration Adım 2/4 — APIC E-postasını Park Et
+    Migration Step 2/4 — Park APIC Email
 
-    APIC Local Registry'deki e-postayı <adres>-old@<domain> formatına çevirir.
-    Bu, JIT provision sırasında Keycloak kaydı ile APIC kaydının aynı e-postaya
-    sahip olmasından doğacak çakışmayı engeller.
+    Converts the email in the APIC Local Registry to <address>-old@<domain> format.
+    This prevents a collision between the Keycloak record and the APIC record
+    sharing the same email during JIT provisioning.
 
-    1. CSV'de apic_email_parked=true ise atlar (idempotent).
-    2. Mevcut e-postayı çeker.
-    3. E-postayı -old@ formatında günceller.
-    4. Değişikliği APIC'ten okuyarak doğrular.
-    5. CSV'de apic_email_parked=true, source_email=<park adresi> yazar.
+    1. Skips if apic_email_parked=true in CSV (idempotent).
+    2. Fetches the current email.
+    3. Updates the email in -old@ format.
+    4. Reads back from APIC to verify the change.
+    5. Writes apic_email_parked=true, source_email=<parked address> to CSV.
 
-    Döner: başarıda True, hata/atlanmada False.
+    Returns: True on success, False on error/skip.
 
-    Müşteri Hataları:
-      APIC güncelleme reddedildi → Kullanıcı dış kaynaklı (LDAP) olabilir.
-      Doğrulama başarısız → APIC validation kısıtlaması, yöneticiyle görüşün.
+    Common Errors:
+      APIC update rejected → User may be from an external source (LDAP).
+      Verification failed → APIC validation constraint, consult an administrator.
     """
     load_env()
     csv_row = get_user(username)
     if not csv_row:
-        print(f"--> [HATA] '{username}' CSV'de bulunamadı. Önce 03_export_consumer_orgs.py'yi çalıştırın.")
+        print(f"--> [ERROR] '{username}' not found in CSV. Please run 03_export_consumer_orgs.py first.")
         return False
 
     if csv_row.get("apic_email_parked", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{username}' e-postası zaten park edilmiş. Atlanıyor.")
+        print(f"--> [INFO] '{username}' email is already parked. Skipping.")
         return True
 
-    print(f"\n--> [1/3] '{username}' kullanıcısının APIC bilgileri okunuyor...")
+    print(f"\n--> [1/3] Reading APIC information for user '{username}'...")
     current_data = _get_current_user_data(username)
     if not current_data:
         return False
 
     old_email = current_data.get("email", "")
     if not old_email or "@" not in old_email:
-        print(f"--> [HATA] Geçerli e-posta adresi bulunamadı (mevcut: '{old_email}').")
+        print(f"--> [ERROR] No valid email address found (current: '{old_email}').")
         return False
 
     if old_email.split("@")[0].endswith("-old"):
-        print(f"--> [BİLGİ] E-posta zaten park edilmiş durumda ({old_email}). Tekrar eklenmeyecek.")
+        print(f"--> [INFO] Email is already in parked format ({old_email}). Will not be appended again.")
         new_email = old_email
     else:
         parts     = old_email.split("@")
         new_email = f"{parts[0]}-old@{parts[1]}"
 
-    print(f"--> APIC'teki mevcut e-posta : {old_email}")
-    print(f"--> Park edilecek e-posta    : {new_email}")
+    print(f"--> Current email in APIC  : {old_email}")
+    print(f"--> Email to be parked     : {new_email}")
 
-    print("\n--> [2/3] APIC Local Registry güncelleniyor...")
+    print("\n--> [2/3] Updating APIC Local Registry...")
     if not _update_user_email(username, current_data, new_email):
         return False
 
-    print("--> [3/3] Değişiklik APIC'ten okunarak doğrulanıyor...")
+    print("--> [3/3] Verifying change by reading back from APIC...")
     verify = _get_current_user_data(username)
     if verify and verify.get("email") == new_email:
-        print("--> [BAŞARILI] E-posta değişimi doğrulandı!")
+        print("--> [SUCCESS] Email change verified!")
         update_flag(username, "apic_email_parked", True)
         update_source_email(username, new_email)
     else:
-        print("--> [UYARI] Güncelleme komutu çalıştı ancak APIC doğrulaması başarısız oldu.")
-        print("    APIC üzerinde manuel kontrol yapın.")
+        print("--> [WARNING] Update command ran but APIC verification failed.")
+        print("    Please verify manually on APIC.")
         return False
 
     print("==================================================")
@@ -417,15 +417,15 @@ def step_02_park_apic_email(username):
 
 
 # ==============================================================================
-# ADIM 3 — APIC JIT Provision (JWT-Bearer Token Exchange)
+# STEP 3 — APIC JIT Provision (JWT-Bearer Token Exchange)
 # ==============================================================================
 
 def _get_kc_access_token(username, password):
     """
-    Kullanıcının geçici şifresiyle Keycloak'tan Access Token alır.
-    Bu token sonraki adımda APIC'e JWT-Bearer assertion olarak sunulur.
-    KEYCLOAK_CLIENT_ID: APIC'in Keycloak'ta kayıtlı OIDC client'ı.
-    Başarıda access_token string'i, hata durumunda None döner.
+    Obtains an Access Token from Keycloak using the user's temporary password.
+    This token is then presented to APIC as a JWT-Bearer assertion in the next step.
+    KEYCLOAK_CLIENT_ID: the OIDC client registered in Keycloak by APIC.
+    Returns the access_token string on success, None on error.
     """
     target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
     kc_client_id = _get_env("KEYCLOAK_CLIENT_ID", "apic-client")
@@ -446,26 +446,26 @@ def _get_kc_access_token(username, password):
         _, body = _http(url, data=data)
         token = body.get("access_token")
         if not token:
-            print(f"--> [HATA] Access Token alınamadı: {body}")
+            print(f"--> [ERROR] Failed to obtain Access Token: {body}")
         return token
     except urllib.error.HTTPError as e:
-        print(f"--> [HATA] KC token isteği başarısız (HTTP {e.code}): {e.read().decode()}")
+        print(f"--> [ERROR] Keycloak token request failed (HTTP {e.code}): {e.read().decode()}")
         return None
 
 
 def _trigger_apic_jwt_bearer(access_token):
     """
-    Keycloak'tan alınan Access Token'ı APIC'e JWT-Bearer grant olarak sunar.
+    Presents the Access Token obtained from Keycloak to APIC as a JWT-Bearer grant.
 
-    Akış:
-      1. Keycloak'tan alınan access_token, APIC'e 'assertion' alanında gönderilir.
-      2. APIC token'ı Keycloak'a doğrulattırır.
-      3. APIC kendi veritabanında shadow user kaydını açar (JIT provision).
-         Bunun çalışması için APIC'teki Keycloak registry'sinde
-         "Auto onboard" (otomatik kayıt) özelliğinin açık olması gerekir.
+    Flow:
+      1. The access_token from Keycloak is sent to APIC in the 'assertion' field.
+      2. APIC validates the token against Keycloak.
+      3. APIC opens a shadow user record in its own database (JIT provision).
+         For this to work, the "Auto onboard" feature must be enabled
+         in the Keycloak registry configured in APIC.
 
-    Realm formatı: consumer:<prov_org>:<catalog>/<keycloak_registry_adi>
-    Başarıda True, hata durumunda False döner.
+    Realm format: consumer:<prov_org>:<catalog>/<keycloak_registry_name>
+    Returns True on success, False on error.
     """
     apic_server       = _get_env("APIC_SERVER")
     prov_org          = _get_env("PROV_ORG")
@@ -481,18 +481,18 @@ def _trigger_apic_jwt_bearer(access_token):
         try:
             with open(creds_file) as f:
                 creds = json.load(f)
-            # credentials.json yapısı: {"consumer_toolkit": {"endpoint": ..., "client_id": ...}}
+            # credentials.json structure: {"consumer_toolkit": {"endpoint": ..., "client_id": ...}}
             toolkit = creds.get("consumer_toolkit") or creds.get("toolkit", {})
             if "endpoint" in toolkit:
                 url = f"{toolkit['endpoint']}/token"
             apic_client_id     = toolkit.get("client_id")     or creds.get("client_id", "")
             apic_client_secret = toolkit.get("client_secret") or creds.get("client_secret", "")
         except Exception as e:
-            print(f"--> [UYARI] credentials.json okunamadı: {e}")
+            print(f"--> [WARNING] Could not read credentials.json: {e}")
 
     if not apic_client_id or not apic_client_secret:
-        print(f"--> [HATA] APIC client_id veya client_secret bulunamadı!")
-        print(f"    credentials.json dosyasını ve APIC_CLIENT_CREDS yolunu kontrol edin.")
+        print(f"--> [ERROR] APIC client_id or client_secret not found!")
+        print(f"    Check the credentials.json file and the APIC_CLIENT_CREDS path.")
         return False
 
     realm_str = f"consumer:{prov_org}:{catalog}/{kc_registry}"
@@ -511,34 +511,34 @@ def _trigger_apic_jwt_bearer(access_token):
             headers={
                 "Content-Type":           "application/json",
                 "Accept":                 "application/json",
-                # X-IBM-Consumer-Context: APIC'e hangi org/catalog context'inin
-                # kullanılacağını belirtir
+                # X-IBM-Consumer-Context: tells APIC which org/catalog context to use
                 "X-IBM-Consumer-Context": f"{prov_org}.{catalog}",
             },
         )
         if status == 200:
-            print("--> [BAŞARILI] APIC JIT-provisioning (Auto Onboard) tamamlandı.")
+            print("--> [SUCCESS] APIC JIT-provisioning (Auto Onboard) completed.")
             return True
         else:
-            print(f"--> [HATA] APIC login başarısız (HTTP {status}): {body}")
+            print(f"--> [ERROR] APIC login failed (HTTP {status}): {body}")
             return False
     except urllib.error.HTTPError as e:
         err_body = e.read().decode()
         if e.code == 400 and "already" in err_body.lower():
-            print("--> [BİLGİ] Kullanıcı APIC üzerinde zaten mevcut.")
+            print("--> [INFO] User already exists on APIC.")
             return True
-        print(f"--> [HATA] APIC login reddedildi (HTTP {e.code}): {err_body}")
+        print(f"--> [ERROR] APIC login rejected (HTTP {e.code}): {err_body}")
         return False
     except Exception as e:
-        print(f"--> [HATA] İstek sırasında beklenmeyen hata: {e}")
+        print(f"--> [ERROR] Unexpected error during request: {e}")
         return False
 
 
 def _clear_temp_password():
     """
-    migration_env.sh'dan KC_TEMP_PASSWORD satırını siler.
-    JIT provision tamamlanır tamamlanmaz çağrılmalıdır; geçici şifre
-    diskte gereksiz yere kalmaz. Temizlik başarısız olursa migration durmaz.
+    Removes the KC_TEMP_PASSWORD line from migration_env.sh.
+    Must be called immediately after JIT provision completes; the temporary
+    password does not linger on disk unnecessarily.
+    If cleanup fails, migration does not stop.
     """
     key = "KC_TEMP_PASSWORD"
     try:
@@ -548,61 +548,61 @@ def _clear_temp_password():
         if len(filtered) != len(lines):
             with open(ENV_FILE, "w") as f:
                 f.writelines(filtered)
-            print(f"--> [BİLGİ] Geçici şifre migration_env.sh'dan temizlendi.")
+            print(f"--> [INFO] Temporary password cleared from migration_env.sh.")
     except Exception:
         pass
 
 
 def step_03_jit_provision(username):
     """
-    Migration Adım 3/4 — APIC JIT Provision (JWT-Bearer Token Exchange)
+    Migration Step 3/4 — APIC JIT Provision (JWT-Bearer Token Exchange)
 
-    Keycloak'ta oluşturulmuş kullanıcıyı APIC'e tanıtır (shadow user kaydı açar).
+    Registers the Keycloak-created user with APIC (opens a shadow user record).
 
-    1. CSV'de migrated/apic_jit_done=true ise atlar (idempotent).
-    2. migration_env.sh'dan KC_TEMP_PASSWORD'ü taze okur
-       (step_01 bu süreçte diske yazdı; taze okuma şart).
-    3. _get_kc_access_token() ile Keycloak'tan Access Token alır.
-    4. _trigger_apic_jwt_bearer() ile token'ı APIC'e JWT-Bearer olarak sunar.
-    5. CSV → apic_jit_done=true, migrated=true yazar.
-    6. _clear_temp_password() ile geçici şifreyi temizler.
+    1. Skips if migrated/apic_jit_done=true in CSV (idempotent).
+    2. Freshly reads KC_TEMP_PASSWORD from migration_env.sh
+       (step_01 wrote it to disk during this run; a fresh read is mandatory).
+    3. Obtains an Access Token from Keycloak via _get_kc_access_token().
+    4. Presents the token to APIC as a JWT-Bearer via _trigger_apic_jwt_bearer().
+    5. Writes apic_jit_done=true, migrated=true to CSV.
+    6. Clears the temporary password via _clear_temp_password().
 
-    Döner: başarıda True, hata durumunda False.
+    Returns: True on success, False on error.
 
-    Müşteri Hataları:
-      KC_TEMP_PASSWORD bulunamadı → step_01 başarısız olmuş, Keycloak'tan elle şifre belirleyin.
-      KC token 401 → client_id yanlış veya kullanıcı Keycloak'ta yok.
-      APIC 401 → APIC client credentials geçersiz.
-      APIC 400 → Realm string formatı yanlış veya Auto Onboard kapalı.
+    Common Errors:
+      KC_TEMP_PASSWORD not found → step_01 failed; set password manually from Keycloak.
+      KC token 401 → client_id is wrong or user does not exist in Keycloak.
+      APIC 401 → APIC client credentials are invalid.
+      APIC 400 → Realm string format is wrong or Auto Onboard is disabled.
     """
-    load_env()  # KC_TEMP_PASSWORD step_01 tarafından az önce yazıldı; taze okuma şart
+    load_env()  # KC_TEMP_PASSWORD was just written by step_01; a fresh read is mandatory
     csv_row = get_user(username)
     if not csv_row:
-        print(f"--> [HATA] '{username}' CSV'de bulunamadı.")
+        print(f"--> [ERROR] '{username}' not found in CSV.")
         return False
 
     if csv_row.get("migrated", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{username}' zaten migrate edilmiş. Atlanıyor.")
+        print(f"--> [INFO] '{username}' already migrated. Skipping.")
         return True
 
     if csv_row.get("apic_jit_done", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{username}' APIC'te zaten provision edilmiş. Atlanıyor.")
+        print(f"--> [INFO] '{username}' already provisioned in APIC. Skipping.")
         return True
 
     kc_temp_password = os.environ.get("KC_TEMP_PASSWORD", "")
     if not kc_temp_password:
-        print("--> [HATA] KC_TEMP_PASSWORD bulunamadı!")
-        print("    step_01_create_kc_user başarıyla tamamlanmış olmalı.")
-        print("    Keycloak'ta kullanıcı varsa admin panelinden şifre belirleyip")
-        print("    migration_env.sh'a 'export KC_TEMP_PASSWORD=\"şifre\"' ekleyebilirsiniz.")
+        print("--> [ERROR] KC_TEMP_PASSWORD not found!")
+        print("    step_01_create_kc_user must have completed successfully.")
+        print("    If the user exists in Keycloak, you can set a password from the admin panel")
+        print("    and add 'export KC_TEMP_PASSWORD=\"password\"' to migration_env.sh.")
         return False
 
-    print(f"\n--> [1/2] '{username}' için Keycloak'tan Access Token alınıyor...")
+    print(f"\n--> [1/2] Obtaining Access Token from Keycloak for '{username}'...")
     access_token = _get_kc_access_token(username, kc_temp_password)
     if not access_token:
         return False
 
-    print(f"--> [2/2] APIC'e JWT-Bearer token gönderiliyor (JIT Provision)...")
+    print(f"--> [2/2] Sending JWT-Bearer token to APIC (JIT Provision)...")
     success = _trigger_apic_jwt_bearer(access_token)
     if not success:
         return False
@@ -612,21 +612,21 @@ def step_03_jit_provision(username):
     _clear_temp_password()
 
     print("==================================================")
-    print(f"[TAMAMLANDI] '{username}' APIC'e Keycloak üzerinden login edildi.")
+    print(f"[COMPLETE] '{username}' has been logged into APIC via Keycloak.")
     print("==================================================")
     return True
 
 # ==============================================================================
-# ADIM 4 — Consumer Org Sahipliğini Devret
+# STEP 4 — Transfer Consumer Org Ownership
 # ==============================================================================
 
 def _get_target_email_for_org(username):
     """
-    APIC Local Registry'den kullanıcının güncel e-postasını okur.
-    step_02 sonrasında e-posta -old@ formatında olabilir; bu fonksiyon
-    -old@ kısmını temizleyerek Keycloak'taki gerçek e-postayı döndürür.
-    Shadow user Keycloak'ta orijinal e-posta ile oluşturulduğundan
-    bu eşleştirme kritiktir.
+    Reads the current email of the user from the APIC Local Registry.
+    After step_02, the email may be in -old@ format; this function
+    strips the -old@ suffix to return the real email address in Keycloak.
+    This matching is critical because the shadow user was created in Keycloak
+    using the original email address.
     """
     cmd = [
         "apic", "users:get", username,
@@ -641,15 +641,16 @@ def _get_target_email_for_org(username):
             email = email.replace("-old@", "@")
         return email
     except Exception as e:
-        print(f"--> [HATA] APIC'ten e-posta alınamadı: {e}")
+        print(f"--> [ERROR] Failed to retrieve email from APIC: {e}")
         return None
 
 
 def _get_shadow_user_url(consumer_org, expected_email):
     """
-    APIC'teki Keycloak registry'sinde e-posta adresiyle shadow user'ı arar
-    ve APIC URL'sini döndürür. Bu URL üye ekleme ve sahiplik devri için gereklidir.
-    Bulunamazsa None döner.
+    Searches the Keycloak registry in APIC for a shadow user by email address
+    and returns their APIC URL. This URL is required for adding a member and
+    transferring ownership.
+    Returns None if not found.
     """
     cmd = [
         "apic", "users:list",
@@ -666,16 +667,16 @@ def _get_shadow_user_url(consumer_org, expected_email):
                 return u.get("url")
         return None
     except Exception as e:
-        print(f"--> [HATA] Keycloak registry listesi okunamadı: {e}")
+        print(f"--> [ERROR] Failed to read Keycloak registry list: {e}")
         return None
 
 
 def _add_kc_user_as_member(consumer_org, username, user_url):
     """
-    Shadow user'ı consumer org'a üye olarak ekler.
-    Sahiplik devri yapılabilmesi için kullanıcının önce org'un üyesi olması şarttır.
-    Zaten üyeyse idempotent davranır (already exists kontrolü).
-    Başarıda True, hata durumunda False döner.
+    Adds the shadow user as a member of the consumer org.
+    The user must be a member of the org before ownership can be transferred.
+    Behaves idempotently if already a member (already exists check).
+    Returns True on success, False on error.
     """
     yaml_content = f"""name: "{username}-kc"
 title: "{username}"
@@ -691,23 +692,23 @@ user:
     try:
         res = subprocess.run(cmd, input=yaml_content, capture_output=True, text=True)
         if res.returncode == 0:
-            print(f"--> [BAŞARILI] Shadow user '{consumer_org}' org'una üye eklendi.")
+            print(f"--> [SUCCESS] Shadow user added as member to org '{consumer_org}'.")
             return True
         if "already exists" in (res.stderr + res.stdout).lower():
-            print("--> [BİLGİ] Shadow user zaten bu org'un üyesi.")
+            print("--> [INFO] Shadow user is already a member of this org.")
             return True
-        print(f"--> [HATA] Üye ekleme başarısız:\n{res.stderr.strip() or res.stdout.strip()}")
+        print(f"--> [ERROR] Failed to add member:\n{res.stderr.strip() or res.stdout.strip()}")
         return False
     except Exception as e:
-        print(f"--> [HATA] Üye ekleme sırasında beklenmeyen hata: {e}")
+        print(f"--> [ERROR] Unexpected error while adding member: {e}")
         return False
 
 
 def _get_member_url(consumer_org, expected_email):
     """
-    Consumer org üye listesinden shadow user'ın member URL'sini döndürür.
-    transfer-owner komutu kullanıcı URL'sini değil, member URL'sini bekler.
-    Bulunamazsa None döner.
+    Returns the member URL of the shadow user from the consumer org member list.
+    The transfer-owner command expects a member URL, not a user URL.
+    Returns None if not found.
     """
     cmd = [
         "apic", "members:list", "--scope", "consumer-org",
@@ -725,17 +726,17 @@ def _get_member_url(consumer_org, expected_email):
                 return m.get("url")
         return None
     except Exception as e:
-        print(f"--> [HATA] Üye listesi okunamadı: {e}")
+        print(f"--> [ERROR] Failed to read member list: {e}")
         return None
 
 
 def _transfer_ownership(consumer_org, member_url):
     """
-    consumer-orgs:transfer-owner --cascade komutu ile sahipliği devreder.
-    --cascade: Consumer Org altındaki App ve Subscription kayıtlarının owner'ı
-    da yeni kullanıcıya güncellenir.
-    DİKKAT: Bu geri alınamaz bir işlemdir; rollback scripti bu adımı tersine çevirmez.
-    Başarıda True, CLI hatasında False döner.
+    Transfers ownership using the consumer-orgs:transfer-owner --cascade command.
+    --cascade: also updates the owner of App and Subscription records
+    under the Consumer Org to the new user.
+    WARNING: This is an irreversible operation; the rollback script does not reverse this step.
+    Returns True on success, False on CLI error.
     """
     yaml_content = f"new_owner_member_url: {member_url}\n"
     cmd = [
@@ -746,70 +747,70 @@ def _transfer_ownership(consumer_org, member_url):
     ]
     try:
         subprocess.run(cmd, input=yaml_content, capture_output=True, text=True, check=True)
-        print(f"--> [BAŞARILI] '{consumer_org}' sahipliği Keycloak profiline devredildi.")
+        print(f"--> [SUCCESS] '{consumer_org}' ownership transferred to Keycloak profile.")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"--> [HATA] Sahiplik devri başarısız:\n{e.stderr.strip() or e.stdout.strip()}")
+        print(f"--> [ERROR] Ownership transfer failed:\n{e.stderr.strip() or e.stdout.strip()}")
         return False
 
 
 def step_04_transfer_org(username):
     """
-    Migration Adım 4/4 — Consumer Org Sahipliğini Devret
+    Migration Step 4/4 — Transfer Consumer Org Ownership
 
-    JIT provision ile APIC'te shadow user açıldıktan sonra
-    consumer org'un sahipliği Local Registry kullanıcısından Keycloak profiline geçer.
+    After the shadow user is opened in APIC via JIT provision,
+    the consumer org ownership moves from the Local Registry user to the Keycloak profile.
 
-    1. CSV'de migrated=true ise atlar (idempotent).
-    2. CSV'den consumer_org adını okur.
-    3. APIC Local Registry'deki e-postadan (-old@ temizleyerek) gerçek e-postayı hesaplar.
-    4. Keycloak registry'sinde shadow user URL'sini bulur.
-    5. Shadow user'ı consumer org'a üye olarak ekler.
-    6. consumer-orgs:transfer-owner --cascade ile sahipliği devreder.
-    7. CSV → org_owner_xfrd=true, migrated=true yazar.
+    1. Skips if migrated=true in CSV (idempotent).
+    2. Reads the consumer_org name from CSV.
+    3. Derives the real email from the APIC Local Registry email (stripping -old@).
+    4. Finds the shadow user URL in the Keycloak registry.
+    5. Adds the shadow user as a member of the consumer org.
+    6. Transfers ownership via consumer-orgs:transfer-owner --cascade.
+    7. Writes org_owner_xfrd=true, migrated=true to CSV.
 
-    Döner: başarıda True, hata durumunda False.
+    Returns: True on success, False on error.
 
-    Müşteri Hataları:
-      Shadow user bulunamadı → step_03 tamamlanmamış.
-      Sahiplik devri başarısız → --cascade bazı versiyonlarda desteklenmeyebilir.
+    Common Errors:
+      Shadow user not found → step_03 has not completed.
+      Ownership transfer failed → --cascade may not be supported in some versions.
     """
     load_env()
     csv_row = get_user(username)
     if not csv_row:
-        print(f"--> [HATA] '{username}' CSV'de bulunamadı.")
+        print(f"--> [ERROR] '{username}' not found in CSV.")
         return False
 
     if csv_row.get("migrated", "false").lower() == "true":
-        print(f"--> [BİLGİ] '{username}' zaten migrate edilmiş. Atlanıyor.")
+        print(f"--> [INFO] '{username}' already migrated. Skipping.")
         return True
 
     consumer_org = csv_row.get("consumer_org", "")
     if not consumer_org:
-        print(f"--> [HATA] '{username}' için CSV'de consumer_org bilgisi yok.")
+        print(f"--> [ERROR] No consumer_org information in CSV for '{username}'.")
         return False
 
-    print(f"\n--> [1/4] '{username}' için hedef e-posta hesaplanıyor...")
+    print(f"\n--> [1/4] Calculating target email for '{username}'...")
     expected_email = _get_target_email_for_org(username)
     if not expected_email:
         return False
-    print(f"--> [BİLGİ] Keycloak'taki e-posta: {expected_email}")
+    print(f"--> [INFO] Email in Keycloak: {expected_email}")
 
-    print(f"--> [2/4] APIC Keycloak registry'sinde shadow user aranıyor...")
+    print(f"--> [2/4] Searching for shadow user in APIC Keycloak registry...")
     user_url = _get_shadow_user_url(consumer_org, expected_email)
     if not user_url:
-        print(f"--> [HATA] '{expected_email}' için shadow user bulunamadı.")
-        print(f"    step_03_jit_provision'ın başarıyla tamamlandığını doğrulayın.")
+        print(f"--> [ERROR] Shadow user not found for '{expected_email}'.")
+        print(f"    Verify that step_03_jit_provision completed successfully.")
         return False
 
-    print(f"--> [3/4] Shadow user '{consumer_org}' org'una üye ekleniyor...")
+    print(f"--> [3/4] Adding shadow user as member to org '{consumer_org}'...")
     if not _add_kc_user_as_member(consumer_org, username, user_url):
         return False
 
-    print(f"--> [4/4] Consumer org sahipliği devrediliyor (--cascade)...")
+    print(f"--> [4/4] Transferring consumer org ownership (--cascade)...")
     member_url = _get_member_url(consumer_org, expected_email)
     if not member_url:
-        print("--> [HATA] Member URL alınamadı. Üye listesini manuel kontrol edin.")
+        print("--> [ERROR] Could not retrieve Member URL. Please check the member list manually.")
         return False
 
     if not _transfer_ownership(consumer_org, member_url):
@@ -819,20 +820,20 @@ def step_04_transfer_org(username):
     mark_migrated(username)
 
     print("==================================================")
-    print(f"[TAMAMLANDI] '{consumer_org}' → owner artık Keycloak profili.")
+    print(f"[COMPLETE] '{consumer_org}' → owner is now the Keycloak profile.")
     print("==================================================")
     return True
 
 
 # ==============================================================================
-# ADIM 5 — Keycloak Şifre Belirleme E-postası
+# STEP 5 — Keycloak Password Setup Email
 # ==============================================================================
 
 def _get_kc_user_id(token, username):
     """
-    Keycloak Admin API'sinden kullanıcının UUID'sini döndürür.
-    execute-actions-email endpoint'i kullanıcı adını değil UUID'yi bekler.
-    Bulunamazsa None döner.
+    Returns the UUID of the user from the Keycloak Admin API.
+    The execute-actions-email endpoint expects a UUID, not a username.
+    Returns None if not found.
     """
     target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
     url = f"{_get_env('KEYCLOAK_URL')}/admin/realms/{target_realm}/users?username={username}&exact=true"
@@ -843,18 +844,18 @@ def _get_kc_user_id(token, username):
             users = json.loads(resp.read().decode())
             if users:
                 return users[0]["id"]
-            print(f"--> [HATA] '{username}' Keycloak'ta bulunamadı!")
+            print(f"--> [ERROR] '{username}' not found in Keycloak!")
             return None
     except Exception as e:
-        print(f"--> [HATA] Kullanıcı UUID sorgusu başarısız: {e}")
+        print(f"--> [ERROR] User UUID query failed: {e}")
         return None
 
 
 def _send_update_password_email(token, user_id, username):
     """
-    Keycloak Admin API üzerinden UPDATE_PASSWORD action e-postası gönderir.
-    Kullanıcıya şifre belirleme bağlantısı içeren e-posta iletilir.
-    HTTP 200 veya 204 başarı sayılır. Hata durumunda False döner.
+    Sends an UPDATE_PASSWORD action email via the Keycloak Admin API.
+    The user receives an email containing a link to set their password.
+    HTTP 200 or 204 is considered success. Returns False on error.
     """
     target_realm = _get_env("KEYCLOAK_REALM_NAME", "apic-demo")
     url = f"{_get_env('KEYCLOAK_URL')}/admin/realms/{target_realm}/users/{user_id}/execute-actions-email"
@@ -865,81 +866,81 @@ def _send_update_password_email(token, user_id, username):
         req.add_header("Content-Type", "application/json")
         with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             if resp.status in (200, 204):
-                print(f"--> [BAŞARILI] '{username}' için şifre belirleme e-postası gönderildi.")
+                print(f"--> [SUCCESS] Password setup email sent for '{username}'.")
                 return True
         return False
     except urllib.error.HTTPError as e:
-        print(f"--> [HATA] Mail gönderilemedi (HTTP {e.code}): {e.read().decode()}")
+        print(f"--> [ERROR] Failed to send email (HTTP {e.code}): {e.read().decode()}")
         return False
     except Exception as e:
-        print(f"--> [HATA] Beklenmeyen hata: {e}")
+        print(f"--> [ERROR] Unexpected error: {e}")
         return False
 
 
 def step_05_send_password_email(username):
     """
-    Migration Adım 5/5 — Keycloak Şifre Belirleme E-postası
+    Migration Step 5/5 — Keycloak Password Setup Email
 
-    Migration tamamlandıktan (migrated=true) sonra kullanıcıya
-    Keycloak üzerinden UPDATE_PASSWORD e-postası gönderir.
+    After migration is complete (migrated=true), sends the user
+    an UPDATE_PASSWORD email via Keycloak.
 
-    1. CSV'de migrated=true değilse atlar — migration henüz tamamlanmamış demektir.
-    2. Keycloak admin token alır.
-    3. Kullanıcının Keycloak UUID'sini sorgular.
-    4. execute-actions-email endpoint'i ile UPDATE_PASSWORD tetikler.
+    1. Skips if migrated=true is not set in CSV — migration is not yet complete.
+    2. Obtains a Keycloak admin token.
+    3. Queries the user's Keycloak UUID.
+    4. Triggers UPDATE_PASSWORD via the execute-actions-email endpoint.
 
-    Döner: başarıda True, hata durumunda False.
+    Returns: True on success, False on error.
 
-    Müşteri Hataları:
-      migrated=false → önceki adımlar tamamlanmamış, önce migration'ı bitirin.
-      UUID bulunamadı → kullanıcı Keycloak'ta yok, step_01'i kontrol edin.
-      Mail gönderilemedi → Keycloak SMTP ayarları eksik/yanlış olabilir.
+    Common Errors:
+      migrated=false → previous steps have not completed; finish migration first.
+      UUID not found → user does not exist in Keycloak; check step_01.
+      Email could not be sent → Keycloak SMTP settings may be missing or incorrect.
     """
     load_env()
     csv_row = get_user(username)
     if not csv_row:
-        print(f"--> [HATA] '{username}' CSV'de bulunamadı.")
+        print(f"--> [ERROR] '{username}' not found in CSV.")
         return False
 
     if csv_row.get("migrated", "false").lower() != "true":
-        print(f"--> [UYARI] '{username}' henüz migrate edilmemiş (migrated=false). E-posta atlanıyor.")
+        print(f"--> [WARNING] '{username}' has not been migrated yet (migrated=false). Email skipped.")
         return False
 
-    print(f"\n--> [1/3] Keycloak admin token alınıyor...")
+    print(f"\n--> [1/3] Obtaining Keycloak admin token...")
     token = _get_kc_admin_token()
     if not token:
         return False
 
-    print(f"--> [2/3] '{username}' için Keycloak UUID sorgulanıyor...")
+    print(f"--> [2/3] Querying Keycloak UUID for '{username}'...")
     user_id = _get_kc_user_id(token, username)
     if not user_id:
         return False
-    print(f"--> [BİLGİ] UUID: {user_id}")
+    print(f"--> [INFO] UUID: {user_id}")
 
-    print(f"--> [3/3] UPDATE_PASSWORD e-postası tetikleniyor...")
+    print(f"--> [3/3] Triggering UPDATE_PASSWORD email...")
     if not _send_update_password_email(token, user_id, username):
         return False
 
     print("==================================================")
-    print(f"[TAMAMLANDI] '{username}' şifre belirleme e-postası gönderildi.")
+    print(f"[COMPLETE] Password setup email sent for '{username}'.")
     print("==================================================")
     return True
 
 
 # ==============================================================================
-# Tek kullanıcı testi için doğrudan çalıştırma
+# Direct execution for single-user testing
 # ==============================================================================
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Kullanım: python migration_steps.py <username> [consumer_org]")
+        print("Usage: python migration_steps.py <username> [consumer_org]")
         sys.exit(1)
 
     _username = sys.argv[1]
     _org      = sys.argv[2] if len(sys.argv) > 2 else ""
 
     print(f"\n{'='*60}")
-    print(f"  TEK KULLANICI MİGRASYON: {_username}")
+    print(f"  SINGLE USER MIGRATION: {_username}")
     print(f"{'='*60}")
 
     load_env()

@@ -1,26 +1,26 @@
 #!/usr/bin/env python3.11
 """
-03_export_consumer_orgs.py — APIC Consumer Org & Owner Dışa Aktarma
+03_export_consumer_orgs.py — APIC Consumer Org & Owner Export
 
-Çalıştırma sırası: 03  (00_setup_env.py'den SONRA, 04_run_migration.py'den ÖNCE)
+Execution order: 03  (AFTER 00_setup_env.py, BEFORE 04_run_migration.py)
 
-Tüm consumer org'ları APIC API'sinden sayfalama (paging) ile çeker,
-her org'un owner kullanıcısını ayrıca sorgular ve sonuçları
-migration_users.csv dosyasına yazar.
+Fetches all consumer orgs from the APIC API using pagination,
+queries the owner user for each org separately, and writes the
+results to migration_users.csv.
 
-Bu CSV, 04_run_migration.py tarafından migration input'u olarak kullanılır.
+This CSV is used as migration input by 04_run_migration.py.
 
-Ne Zaman Tekrar Çalıştırılır:
-  - Migration'dan önce ilk kez mutlaka çalıştırılmalıdır (CSV oluşturur).
-  - APIC'e yeni consumer org eklendiyse tekrar çalıştırılabilir;
-    mevcut CSV'deki kayıtları korur, sadece yeni org'ları ekler.
-  - Zaten migrate edilmiş (migrated=true) kullanıcılar CSV'de kalır,
-    bir sonraki çalıştırmada tekrar eklenmez (username kontrolü).
+When to re-run:
+  - Must be run at least once before migration (creates the CSV).
+  - Can be re-run if new consumer orgs are added to APIC;
+    preserves existing CSV records and only appends new orgs.
+  - Already migrated (migrated=true) users remain in the CSV
+    and will not be re-added on the next run (username check).
 
-Kullanım:
-  python 03_export_consumer_orgs.py              # tüm org'lar
-  python 03_export_consumer_orgs.py --page-size 25   # sayfa boyutunu özelleştir
-  python 03_export_consumer_orgs.py --dry-run    # sadece ekrana yaz, CSV'ye yazma
+Usage:
+  python 03_export_consumer_orgs.py              # all orgs
+  python 03_export_consumer_orgs.py --page-size 25   # custom page size
+  python 03_export_consumer_orgs.py --dry-run    # print only, do not write to CSV
 """
 
 import subprocess
@@ -33,36 +33,36 @@ from datetime import datetime
 
 ENV_FILE   = "migration_env.sh"
 CSV_FILE   = "migration_users.csv"
-PAGE_SIZE  = 50   # APIC'e gönderilen --limit değeri
+PAGE_SIZE  = 50   # --limit value sent to APIC
 
 CSV_FIELDS = [
-    # SOURCE — APIC Local Registry (eski sistem)
+    # SOURCE — APIC Local Registry (legacy system)
     "username",
     "consumer_org",
     "source_email",
-    # TARGET — Keycloak (yeni sistem)
+    # TARGET — Keycloak (new system)
     "target_email",
     "kc_user_created",
     "apic_email_parked",
     "apic_jit_done",
     "org_owner_xfrd",
-    # DURUM
+    # STATUS
     "migrated",
     "migrated_at",
 ]
 
 
 # ------------------------------------------------------------------------------
-# ORTAM
+# ENVIRONMENT
 # ------------------------------------------------------------------------------
 
 def load_env():
     """
-    migration_env.sh dosyasını okuyarak 'export KEY="VALUE"' satırlarını
-    os.environ'a yükler. Dosya yoksa hata verip çıkar.
+    Reads migration_env.sh and loads 'export KEY="VALUE"' lines
+    into os.environ. Exits with an error if the file is not found.
     """
     if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı! Önce 00_setup_env.py'i çalıştırın.")
+        print(f"--> [ERROR] '{ENV_FILE}' not found! Please run 00_setup_env.py first.")
         sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
@@ -74,27 +74,27 @@ def load_env():
 
 
 # ------------------------------------------------------------------------------
-# APIC SORGULARI
+# APIC QUERIES
 # ------------------------------------------------------------------------------
 
 def _apic_run(cmd):
-    """APIC CLI komutunu çalıştırır, JSON parse eder. Hata durumunda None döner."""
+    """Runs an APIC CLI command and parses the JSON output. Returns None on error."""
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return json.loads(res.stdout)
     except subprocess.CalledProcessError as e:
         err = (e.stderr or e.stdout or "").strip()
-        print(f"--> [HATA] APIC komutu başarısız: {' '.join(cmd)}\n    {err}")
+        print(f"--> [ERROR] APIC command failed: {' '.join(cmd)}\n    {err}")
         return None
     except json.JSONDecodeError:
-        print(f"--> [HATA] APIC yanıtı JSON değil: {' '.join(cmd)}")
+        print(f"--> [ERROR] APIC response is not valid JSON: {' '.join(cmd)}")
         return None
 
 
 def fetch_consumer_orgs_page(server, prov_org, catalog, limit, offset):
     """
-    Belirtilen limit/offset ile bir sayfa consumer org döndürür.
-    Yanıt: {"total_results": N, "results": [...]} şeklinde beklenir.
+    Returns one page of consumer orgs for the given limit/offset.
+    Expected response format: {"total_results": N, "results": [...]}
     """
     cmd = [
         "apic", "consumer-orgs:list",
@@ -108,8 +108,8 @@ def fetch_consumer_orgs_page(server, prov_org, catalog, limit, offset):
 
 def fetch_all_consumer_orgs(server, prov_org, catalog, page_size):
     """
-    Tüm consumer org'ları paging ile çeker, birleşik liste döndürür.
-    Her sayfa sonunda ilerleme ekrana basılır.
+    Fetches all consumer orgs using pagination and returns a combined list.
+    Progress is printed to the screen after each page.
     """
     all_orgs  = []
     offset    = 0
@@ -118,22 +118,22 @@ def fetch_all_consumer_orgs(server, prov_org, catalog, page_size):
 
     while True:
         page_no += 1
-        print(f"--> [APIC] Sayfa {page_no} alınıyor (offset={offset}, limit={page_size})...")
+        print(f"--> [APIC] Fetching page {page_no} (offset={offset}, limit={page_size})...")
 
         data = fetch_consumer_orgs_page(server, prov_org, catalog, page_size, offset)
         if data is None:
-            print("--> [HATA] Sayfa alınamadı, durduruluyor.")
+            print("--> [ERROR] Failed to fetch page, stopping.")
             break
 
         results = data.get("results", [])
         if total is None:
             total = data.get("total_results", 0)
-            print(f"--> [BİLGİ] Toplam consumer org sayısı: {total}")
+            print(f"--> [INFO] Total consumer org count: {total}")
 
         all_orgs.extend(results)
-        print(f"--> [BİLGİ] Bu sayfada {len(results)} org alındı. Toplam alınan: {len(all_orgs)}/{total}")
+        print(f"--> [INFO] {len(results)} orgs retrieved on this page. Total fetched: {len(all_orgs)}/{total}")
 
-        # Son sayfaya ulaştık mı?
+        # Have we reached the last page?
         offset += page_size
         if offset >= total or not results:
             break
@@ -143,10 +143,9 @@ def fetch_all_consumer_orgs(server, prov_org, catalog, page_size):
 
 def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
     """
-    Bir consumer org'un owner kullanıcısını members:list ile çeker.
-    owner_url, consumer-orgs:list yanıtından gelen değerdir — eşleştirme
-    için kullanılır.
-    Returns: {"username": ..., "email": ...} veya None
+    Fetches the owner user of a consumer org via members:list.
+    owner_url is the value from the consumer-orgs:list response — used for matching.
+    Returns: {"username": ..., "email": ...} or None
     """
     cmd_members = [
         "apic", "members:list", "--scope", "consumer-org",
@@ -162,17 +161,17 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
 
     keycloak_registry = os.environ.get("KEYCLOAK_REGISTRY_NAME", "keycluk")
 
-    # Önce owner_url ile tam eşleştir, bulamazsan role=owner'ı dene.
-    # Owner zaten Keycloak kullanıcısıysa bu org daha önce migrate edilmiş — atla.
+    # First try exact match by owner_url; fall back to role=owner if not found.
+    # If the owner is already a Keycloak user, this org was previously migrated — skip.
     for member in items:
         user = member.get("user", {})
         if user.get("identity_provider") == keycloak_registry:
-            print(f"--> [BİLGİ] '{consumer_org_name}' zaten Keycloak kullanıcısına ait. Atlanıyor.")
+            print(f"--> [INFO] '{consumer_org_name}' already belongs to a Keycloak user. Skipping.")
             return None
         if owner_url and user.get("url") == owner_url:
-            # APIC'in "name" alanı users:get komutuna verilmesi gereken case-preserved
-            # değerdir. "username" küçük harfe normalize edilmiş olabilir ve
-            # users:get ile sorgulandığında "Not found" hatasına neden olur.
+            # The APIC "name" field is the case-preserved value to pass to users:get.
+            # "username" may be normalised to lowercase and cause "Not found" errors
+            # when queried with users:get.
             return {"username": user.get("name") or user.get("username", ""), "email": user.get("email", "")}
 
     for member in items:
@@ -180,7 +179,7 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
         if member.get("role", "") == "owner":
             return {"username": user.get("name") or user.get("username", ""), "email": user.get("email", "")}
 
-    print(f"--> [UYARI] '{consumer_org_name}' için owner üye bulunamadı.")
+    print(f"--> [WARNING] No owner member found for '{consumer_org_name}'.")
     return None
 
 
@@ -190,9 +189,9 @@ def fetch_owner_info(server, prov_org, catalog, consumer_org_name, owner_url):
 
 def load_existing_csv():
     """
-    Mevcut migration_users.csv dosyasını {username: row} dict olarak döndürür.
-    Dosya yoksa boş dict döner. Yeniden çalıştırmalarda mevcut kayıtları
-    korumak için kullanılır.
+    Returns the existing migration_users.csv as a {username: row} dict.
+    Returns an empty dict if the file does not exist. Used to preserve
+    existing records on re-runs.
     """
     if not os.path.exists(CSV_FILE):
         return {}
@@ -202,10 +201,10 @@ def load_existing_csv():
 
 def write_csv(rows):
     """
-    Tüm satırları (mevcut + yeni) migration_users.csv'ye yazar.
-    Her çalıştırmada dosyanın tamamını yeniden yazar; bu nedenle
-    load_existing_csv() ile eski kayıtlar önce belleğe alınıp
-    new_rows listesine dahil edilir.
+    Writes all rows (existing + new) to migration_users.csv.
+    Rewrites the entire file on each run; therefore existing records
+    are loaded into memory via load_existing_csv() and included in
+    the new_rows list before writing.
     """
     with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -219,12 +218,12 @@ def write_csv(rows):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="APIC consumer org'larını ve owner kullanıcılarını CSV'ye aktarır."
+        description="Exports APIC consumer orgs and their owner users to CSV."
     )
     parser.add_argument("--page-size", type=int, default=PAGE_SIZE,
-                        help=f"APIC paging limit (varsayılan: {PAGE_SIZE})")
+                        help=f"APIC paging limit (default: {PAGE_SIZE})")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Sadece ekrana yaz, CSV'ye kaydetme")
+                        help="Print only, do not write to CSV")
     args = parser.parse_args()
 
     load_env()
@@ -234,29 +233,29 @@ def main():
     catalog  = os.environ["CATALOG"]
 
     print("\n==================================================")
-    print("  CONSUMER ORG & OWNER DIŞA AKTARMA              ")
-    print(f"  Sunucu  : {server}")
+    print("  CONSUMER ORG & OWNER EXPORT                    ")
+    print(f"  Server  : {server}")
     print(f"  Org     : {prov_org}  |  Catalog: {catalog}")
-    print(f"  Sayfa   : {args.page_size} org/sayfa")
+    print(f"  Page    : {args.page_size} orgs/page")
     if args.dry_run:
-        print("  MOD     : DRY-RUN (CSV'ye yazılmayacak)")
+        print("  MODE    : DRY-RUN (will not write to CSV)")
     print("==================================================\n")
 
-    # Tüm consumer org'ları çek
+    # Fetch all consumer orgs
     orgs = fetch_all_consumer_orgs(server, prov_org, catalog, args.page_size)
     if not orgs:
-        print("--> [HATA] Hiç consumer org bulunamadı, çıkılıyor.")
+        print("--> [ERROR] No consumer orgs found, exiting.")
         sys.exit(1)
 
-    # MEVCUT CSV'Yİ HAFIZAYA AL (Sözlük Formatında)
+    # LOAD EXISTING CSV INTO MEMORY (as a dict)
     existing_users = load_existing_csv()
 
     skipped   = 0
     added     = 0
     failed    = 0
-    already   = 0   # zaten Keycloak'ta olan org sayısı
+    already   = 0   # number of orgs already owned by a Keycloak user
 
-    print(f"\n--> [BİLGİ] {len(orgs)} org için owner bilgisi alınıyor...\n")
+    print(f"\n--> [INFO] Fetching owner information for {len(orgs)} orgs...\n")
 
     for org in orgs:
         org_name  = org.get("name", "")
@@ -269,20 +268,20 @@ def main():
             already += 1
             continue
         if not owner.get("username"):
-            print(f"--> [UYARI] '{org_name}' owner username boş, atlanıyor.")
+            print(f"--> [WARNING] Owner username is empty for '{org_name}', skipping.")
             failed += 1
             continue
 
         username = owner["username"]
         email    = owner["email"]
 
-        # EĞER KULLANICI ZATEN HAFIZADAKİ CSV'DE VARSA HİÇ DOKUNMA
+        # IF THE USER IS ALREADY IN THE IN-MEMORY CSV, DO NOT TOUCH IT
         if username in existing_users:
-            print(f"--> [ATLA] '{username}' ({org_name}) zaten CSV'de kayıtlı.")
+            print(f"--> [SKIP] '{username}' ({org_name}) already recorded in CSV.")
             skipped += 1
             continue
 
-        # EĞER YENİ BİR KULLANICIYSA, ONU DA MEVCUT HAFIZAYA (SÖZLÜĞE) EKLE
+        # IF IT IS A NEW USER, ADD IT TO THE IN-MEMORY DICT AS WELL
         row = {
             "username":          username,
             "consumer_org":      org_name,
@@ -300,21 +299,20 @@ def main():
         print(f"--> [+] {username:<30} | {org_name:<40} | {email}")
 
     print(f"\n--------------------------------------------------")
-    print(f"  Toplam org      : {len(orgs)}")
-    print(f"  Yeni kayıt      : {added}")
-    print(f"  Zaten CSV'de    : {skipped}")
-    print(f"  Zaten KC'de     : {already}")
-    print(f"  Başarısız       : {failed}")
+    print(f"  Total orgs      : {len(orgs)}")
+    print(f"  New records     : {added}")
+    print(f"  Already in CSV  : {skipped}")
+    print(f"  Already in KC   : {already}")
+    print(f"  Failed          : {failed}")
     print(f"--------------------------------------------------")
 
     if args.dry_run:
-        print("\n--> [DRY-RUN] CSV'ye yazılmadı.")
+        print("\n--> [DRY-RUN] Not written to CSV.")
     else:
-        # MEVCUT + YENİ EKLENEN HER ŞEYİ (TÜM SÖZLÜĞÜ) DOSYAYA YAZ
         final_rows = list(existing_users.values())
         write_csv(final_rows)
-        print(f"\n--> [BAŞARILI] {len(final_rows)} satır '{CSV_FILE}' dosyasına yazıldı.")
-        print(f"    Tarih: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"\n--> [SUCCESS] {len(final_rows)} rows written to '{CSV_FILE}'.")
+        print(f"    Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     print("==================================================\n")
 

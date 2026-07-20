@@ -19,7 +19,7 @@ ENV_FILE = "migration_env.sh"
 
 def load_env():
     if not os.path.exists(ENV_FILE):
-        print(f"--> [HATA] '{ENV_FILE}' bulunamadı!")
+        print(f"--> [ERROR] '{ENV_FILE}' not found!")
         sys.exit(1)
     with open(ENV_FILE, "r") as f:
         for line in f:
@@ -42,7 +42,7 @@ TARGET_REALM      = os.environ.get("KEYCLOAK_REALM_NAME", "apic-demo")
 CATALOG           = os.environ.get("CATALOG", "")
 
 # ------------------------------------------------------------------------------
-# ADIM R0 — Tapuyu Geri Ver (DÜZELTİLDİ: Doğru YAML Payload Formatı)
+# STEP R0 — Revert Org Ownership (FIXED: Correct YAML Payload Format)
 # ------------------------------------------------------------------------------
 def _get_local_user_url(username):
     cmd = [
@@ -58,7 +58,7 @@ def _get_local_user_url(username):
         return None
 
 def _ensure_member_and_get_url(consumer_org, username, user_url):
-    # Üye yap (zaten üyeyse idempotent'tir)
+    # Add as member (idempotent if already a member)
     yaml_content = f'name: "{username}-local"\ntitle: "{username}"\nuser:\n  url: "{user_url}"\n'
     cmd_add = [
         "apic", "members:create", "--scope", "consumer-org", "-",
@@ -67,7 +67,7 @@ def _ensure_member_and_get_url(consumer_org, username, user_url):
     ]
     subprocess.run(cmd_add, input=yaml_content, capture_output=True, text=True)
 
-    # Member URL'yi al
+    # Retrieve the Member URL
     cmd_list = [
         "apic", "members:list", "--scope", "consumer-org",
         "-s", APIC_SERVER, "-o", PROV_ORG, "-c", CATALOG,
@@ -88,12 +88,12 @@ def _ensure_member_and_get_url(consumer_org, username, user_url):
 def revert_org_ownership(consumer_org, local_username):
     user_url = _get_local_user_url(local_username)
     if not user_url:
-        print(f"--> [HATA] Local kullanıcı URL'si alınamadı ({local_username}).")
+        print(f"--> [ERROR] Could not retrieve local user URL ({local_username}).")
         return False
 
     member_url = _ensure_member_and_get_url(consumer_org, local_username, user_url)
     if not member_url:
-        print(f"--> [HATA] Local kullanıcı Member URL'si alınamadı.")
+        print(f"--> [ERROR] Could not retrieve local user Member URL.")
         return False
 
     yaml_content = f"new_owner_member_url: {member_url}\n"
@@ -104,18 +104,18 @@ def revert_org_ownership(consumer_org, local_username):
     ]
     try:
         subprocess.run(cmd, input=yaml_content, capture_output=True, text=True, check=True)
-        print(f"--> [ROLLBACK] '{consumer_org}' tapusu Local Registry'ye ({local_username}) geri devredildi.")
+        print(f"--> [ROLLBACK] '{consumer_org}' ownership transferred back to Local Registry user ({local_username}).")
         return True
     except subprocess.CalledProcessError as e:
         err = e.stderr.strip() or e.stdout.strip()
         if "already the owner" in err.lower():
-            print("--> [ROLLBACK] Local kullanıcı zaten organizasyonun sahibi, devir atlandı.")
+            print("--> [ROLLBACK] Local user is already the owner of the org, transfer skipped.")
             return True
-        print(f"--> [UYARI] Tapu devri geri alınamadı: {err}")
+        print(f"--> [WARNING] Ownership revert failed: {err}")
         return False
 
 # ------------------------------------------------------------------------------
-# ADIM R1 — Nokta Atışı APIC shadow user silme
+# STEP R1 — Targeted APIC shadow user deletion
 # ------------------------------------------------------------------------------
 def _get_exact_apic_kc_username(target_email):
     cmd = [
@@ -138,7 +138,7 @@ def _get_exact_apic_kc_username(target_email):
 def rollback_apic_shadow_user(username, target_email):
     exact_username = _get_exact_apic_kc_username(target_email)
     if not exact_username:
-        print(f"--> [ROLLBACK] '{target_email}' e-postasına sahip APIC shadow user zaten yok, atlanıyor.")
+        print(f"--> [ROLLBACK] No APIC shadow user with email '{target_email}' found, skipping.")
         return True
 
     cmd = [
@@ -148,18 +148,18 @@ def rollback_apic_shadow_user(username, target_email):
     ]
     try:
         subprocess.run(cmd, capture_output=True, text=True, check=True)
-        print(f"--> [ROLLBACK] APIC shadow user '{exact_username}' başarıyla silindi.")
+        print(f"--> [ROLLBACK] APIC shadow user '{exact_username}' successfully deleted.")
         return True
     except subprocess.CalledProcessError as e:
         err = e.stderr.strip() or e.stdout.strip()
         if "read only" in err.lower():
-            print("--> [BİLGİ] Kullanıcı read-only sistem hesabı, silme atlandı.")
+            print("--> [INFO] User is a read-only system account, deletion skipped.")
             return True
-        print(f"--> [HATA] APIC shadow user silinemedi: {err}")
+        print(f"--> [ERROR] Failed to delete APIC shadow user: {err}")
         return False
 
 # ------------------------------------------------------------------------------
-# ADIM R2 — APIC e-postasını orijinaline geri al
+# STEP R2 — Revert APIC email to original
 # ------------------------------------------------------------------------------
 def rollback_apic_email(username, target_email):
     cmd_get = [
@@ -189,14 +189,14 @@ def rollback_apic_email(username, target_email):
     ]
     try:
         subprocess.run(cmd_upd, input=yaml_content, capture_output=True, text=True, check=True)
-        print(f"--> [ROLLBACK] APIC e-postası '{target_email}' olarak geri alındı.")
+        print(f"--> [ROLLBACK] APIC email reverted to '{target_email}'.")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"--> [HATA] E-posta geri alınamadı: {e.stderr.strip() or e.stdout.strip()}")
+        print(f"--> [ERROR] Failed to revert email: {e.stderr.strip() or e.stdout.strip()}")
         return False
 
 # ------------------------------------------------------------------------------
-# ADIM R3 — Keycloak kullanıcısını sil
+# STEP R3 — Delete Keycloak user
 # ------------------------------------------------------------------------------
 def _get_kc_admin_token():
     url = f"{KEYCLOAK_URL}/realms/master/protocol/openid-connect/token"
@@ -224,7 +224,7 @@ def rollback_kc_user(username):
         with urllib.request.urlopen(req, context=_SSL_CTX) as resp:
             users = json.loads(resp.read().decode())
             if not users:
-                print(f"--> [ROLLBACK] Keycloak'ta '{username}' zaten yok, atlanıyor.")
+                print(f"--> [ROLLBACK] '{username}' does not exist in Keycloak, skipping.")
                 return True
             kc_uuid = users[0]["id"]
 
@@ -232,14 +232,14 @@ def rollback_kc_user(username):
             req_del.add_header("Authorization", f"Bearer {token}")
             with urllib.request.urlopen(req_del, context=_SSL_CTX) as resp_del:
                 if resp_del.status in (200, 204):
-                    print(f"--> [ROLLBACK] Keycloak kullanıcısı '{username}' silindi.")
+                    print(f"--> [ROLLBACK] Keycloak user '{username}' deleted.")
                     return True
     except Exception as e:
-        print(f"--> [HATA] KC kullanıcı silinemedi: {e}")
+        print(f"--> [ERROR] Failed to delete Keycloak user: {e}")
         return False
 
 # ------------------------------------------------------------------------------
-# DURUM TESPİTİ VE ORKESTRATÖR
+# STATE DETECTION AND ORCHESTRATOR
 # ------------------------------------------------------------------------------
 def detect_apic_email_parked(username):
     cmd = [
@@ -277,40 +277,40 @@ def rollback_user(csv_row, force=False):
         parked, current_email = detect_apic_email_parked(username)
         target_email = derive_target_email(current_email or target_email)
 
-    # R0: Tapuyu Kurtar (Eğer Org varsa)
+    # R0: Recover ownership (if org exists)
     if consumer_org and (force or csv_row.get("org_owner_xfrd", "false").lower() == "true"):
-        print("--> [R0] Consumer Org tapusu Local kullanıcıya geri devrediliyor...")
+        print("--> [R0] Transferring Consumer Org ownership back to local user...")
         revert_org_ownership(consumer_org, username)
 
-    # R1: Gölgeyi Sil
+    # R1: Delete shadow user
     if force or csv_row.get("apic_jit_done", "false").lower() == "true":
-        print("--> [R1] APIC shadow user aranıyor ve siliniyor...")
+        print("--> [R1] Searching for and deleting APIC shadow user...")
         if not rollback_apic_shadow_user(username, target_email):
-            print(f"--> [DURDURULDU] '{username}' rollback R1'de başarısız oldu.")
+            print(f"--> [STOPPED] '{username}' rollback failed at R1.")
             return False
 
-    # R2: E-postayı İade Et
+    # R2: Revert email
     if force or csv_row.get("apic_email_parked", "false").lower() == "true":
-        print(f"--> [R2] APIC e-postası '{target_email}' olarak geri alınıyor...")
+        print(f"--> [R2] Reverting APIC email to '{target_email}'...")
         if not rollback_apic_email(username, target_email):
-            print(f"--> [DURDURULDU] '{username}' rollback R2'de başarısız oldu.")
+            print(f"--> [STOPPED] '{username}' rollback failed at R2.")
             return False
 
-    # R3: Keycloak'u Temizle
+    # R3: Clean up Keycloak
     if force or csv_row.get("kc_user_created", "false").lower() == "true":
-        print("--> [R3] Keycloak kullanıcısı siliniyor...")
+        print("--> [R3] Deleting Keycloak user...")
         if not rollback_kc_user(username):
-            print(f"--> [DURDURULDU] '{username}' rollback R3'de başarısız oldu.")
+            print(f"--> [STOPPED] '{username}' rollback failed at R3.")
             return False
 
     mark_rollback(username)
-    print(f"--> [ROLLBACK TAMAMLANDI] '{username}' sanki hiç dokunulmamış gibi sıfırlandı.")
+    print(f"--> [ROLLBACK COMPLETE] '{username}' has been fully reset as if untouched.")
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description="Migration adımlarını geri alır.")
-    parser.add_argument("username", nargs="?", help="Tek kullanıcı rollback (opsiyonel)")
-    parser.add_argument("--force", action="store_true", help="Başarılı olanlar dahil tüm listeyi geri al")
+    parser = argparse.ArgumentParser(description="Reverts migration steps.")
+    parser.add_argument("username", nargs="?", help="Single user rollback (optional)")
+    parser.add_argument("--force", action="store_true", help="Roll back all users including already succeeded ones")
     args = parser.parse_args()
 
     if args.username:
@@ -318,21 +318,21 @@ def main():
         if not csv_row:
             if args.force: csv_row = {"username": args.username, "target_email": ""}
             else:
-                print(f"--> [HATA] '{args.username}' CSV'de bulunamadı.")
+                print(f"--> [ERROR] '{args.username}' not found in CSV.")
                 sys.exit(1)
         success = rollback_user(csv_row, force=args.force)
         sys.exit(0 if success else 1)
     else:
-        # --force ile başarılılar dahil bütün CSV'yi çeker
+        # With --force, loads the entire CSV including already succeeded users
         to_rollback = load_users() if args.force else [
             u for u in get_pending_users() if any(u.get(f, "false").lower() == "true" for f in ("kc_user_created", "apic_email_parked", "apic_jit_done", "org_owner_xfrd"))
         ]
 
         if not to_rollback:
-            print("--> [BİLGİ] Rollback gereken kullanıcı yok.")
+            print("--> [INFO] No users require rollback.")
             sys.exit(0)
 
-        print(f"--> {len(to_rollback)} kullanıcı için rollback başlatılıyor...\n")
+        print(f"--> Starting rollback for {len(to_rollback)} user(s)...\n")
         failed = []
         for row in to_rollback:
             if not rollback_user(row, force=args.force):
@@ -340,10 +340,10 @@ def main():
 
         print("\n" + "="*50)
         if failed:
-            print(f"[UYARI] Şu kullanıcılar rollback edilemedi: {', '.join(failed)}")
+            print(f"[WARNING] The following users could not be rolled back: {', '.join(failed)}")
             sys.exit(1)
         else:
-            print("[TAMAMLANDI] Tüm rollback işlemleri başarılı.")
+            print("[COMPLETE] All rollback operations succeeded.")
 
 if __name__ == "__main__":
     main()

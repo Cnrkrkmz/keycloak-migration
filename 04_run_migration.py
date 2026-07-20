@@ -1,29 +1,29 @@
 #!/usr/bin/env python3.11
 """
-04_run_migration.py — Toplu migration orkestratörü.
+04_run_migration.py — Bulk migration orchestrator.
 
-CSV dosyasındaki (migration_users.csv) migrate edilmemiş kullanıcıları
-10'ar kullanıcılık batch'ler halinde işler.
+Processes users from migration_users.csv who have not yet been migrated,
+in batches of 10.
 
-Her kullanıcı için sırayla şu adımları çalıştırır (migration_steps.py):
-  1. step_01_create_kc_user      → Keycloak'ta kullanıcı yarat
-  2. step_02_park_apic_email     → APIC e-postasını -old yap
+For each user, runs the following steps in order (migration_steps.py):
+  1. step_01_create_kc_user      → Create user in Keycloak
+  2. step_02_park_apic_email     → Append -old to the APIC email
   3. step_03_jit_provision       → APIC JIT provision (JWT-Bearer)
-  4. step_04_transfer_org        → Consumer Org sahipliğini Keycloak profiline devret
-  5. step_05_send_password_email → Keycloak UPDATE_PASSWORD e-postası gönder
+  4. step_04_transfer_org        → Transfer Consumer Org ownership to Keycloak profile
+  5. step_05_send_password_email → Send Keycloak UPDATE_PASSWORD email
 
-Her 10 kullanıcı tamamlandığında özet rapor ekrana basılır.
-Batch içinde bir kullanıcı başarısız olursa o kullanıcı atlanır
-(migrated=false kalır) ve bir sonrakiyle devam edilir.
+A summary report is printed after every 10 users.
+If a user fails within a batch, that user is skipped
+(migrated=false remains) and processing continues with the next one.
 
-Kullanım:
-  python 04_run_migration.py                               # tüm pending kullanıcılar
-  python 04_run_migration.py --consumer-org Musti          # tek bir consumer org
-  python 04_run_migration.py --consumer-org Musti Trend    # birden fazla consumer org
-  python 04_run_migration.py --limit 2                     # ilk 2 kullanıcıyı migrate et
-  python 04_run_migration.py --username Mustafa            # belirli kullanıcı adıyla
-  python 04_run_migration.py --dry-run                     # adımları yazdır, çalıştırma
-  python 04_run_migration.py --batch-size 5                # özel batch boyutu
+Usage:
+  python 04_run_migration.py                               # all pending users
+  python 04_run_migration.py --consumer-org Musti          # single consumer org
+  python 04_run_migration.py --consumer-org Musti Trend    # multiple consumer orgs
+  python 04_run_migration.py --limit 2                     # migrate first 2 users
+  python 04_run_migration.py --username Mustafa            # by specific username
+  python 04_run_migration.py --dry-run                     # print steps, do not run
+  python 04_run_migration.py --batch-size 5                # custom batch size
 """
 
 import os
@@ -44,15 +44,15 @@ BATCH_SIZE = 10
 
 
 # ------------------------------------------------------------------------------
-# YARDIMCI — Tek kullanıcı için tüm adımları çalıştır
+# HELPER — Run all steps for a single user
 # ------------------------------------------------------------------------------
 
 def migrate_user(username, consumer_org="", dry_run=False):
     """
-    Tek bir kullanıcı için 5 adımlı migration pipeline'ını sırasıyla çalıştırır.
-    Her adım migration_steps.py'den doğrudan import edilip çağrılır (subprocess yok).
-    dry_run=True ise adım adım hangi fonksiyonun çalışacağını listeler, değişiklik yapmaz.
-    Başarıda True, herhangi bir adım başarısız olursa False döner.
+    Runs the 5-step migration pipeline for a single user in sequence.
+    Each step is directly imported from migration_steps.py and called (no subprocess).
+    If dry_run=True, lists which function would run step by step without making changes.
+    Returns True on success, False if any step fails.
     """
     steps = [
         ("1/5 KC_CREATE  ", step_01_create_kc_user,        [username, consumer_org]),
@@ -73,54 +73,54 @@ def migrate_user(username, consumer_org="", dry_run=False):
         if ok:
             print("OK")
         else:
-            print("BAŞARISIZ")
+            print("FAILED")
             return False
     return True
 
 
 # ------------------------------------------------------------------------------
-# ANA BATCH DÖNGÜSÜ
+# MAIN BATCH LOOP
 # ------------------------------------------------------------------------------
 
 def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None, consumer_orgs=None):
     """
-    CSV'deki pending kullanıcıları batch'ler halinde migrate eder.
+    Migrates pending users from the CSV in batches.
 
-    consumer_orgs: sadece bu consumer org'lara ait kullanıcılar işlenir (önerilen filtre)
-    usernames    : sadece bu kullanıcı adları işlenir
-    limit        : işlenecek maksimum kullanıcı sayısı (None = sınırsız)
-    Filtreler birlikte kullanılabilir; sıra: consumer_org → username → limit.
+    consumer_orgs: only users belonging to these consumer orgs are processed (recommended filter)
+    usernames    : only these usernames are processed
+    limit        : maximum number of users to process (None = unlimited)
+    Filters can be combined; order: consumer_org → username → limit.
     """
     pending = get_pending_users()
 
     if not pending:
-        print("--> [BİLGİ] Migration gereken kullanıcı yok.")
+        print("--> [INFO] No users pending migration.")
         rpt = write_status_report()
-        print(f"--> [BİLGİ] Güncel durum: {rpt}")
+        print(f"--> [INFO] Current status: {rpt}")
         return
 
-    # --consumer-org filtresi
+    # --consumer-org filter
     if consumer_orgs:
         org_set   = {o.lower() for o in consumer_orgs}
         not_found = org_set - {u["consumer_org"].lower() for u in pending}
         if not_found:
-            print(f"--> [UYARI] Şu org'lar CSV'de yok veya zaten migrate edilmiş: {', '.join(sorted(not_found))}")
+            print(f"--> [WARNING] The following orgs are not in the CSV or already migrated: {', '.join(sorted(not_found))}")
         pending = [u for u in pending if u.get("consumer_org", "").lower() in org_set]
 
-    # --username filtresi
+    # --username filter
     if usernames:
         username_set = set(usernames)
         not_found    = username_set - {u["username"] for u in pending}
         if not_found:
-            print(f"--> [UYARI] Şu kullanıcılar CSV'de yok veya zaten migrate edilmiş: {', '.join(sorted(not_found))}")
+            print(f"--> [WARNING] The following users are not in the CSV or already migrated: {', '.join(sorted(not_found))}")
         pending = [u for u in pending if u["username"] in username_set]
 
-    # --limit filtresi
+    # --limit filter
     if limit is not None and limit > 0:
         pending = pending[:limit]
 
     if not pending:
-        print("--> [BİLGİ] Filtre sonrası işlenecek kullanıcı kalmadı.")
+        print("--> [INFO] No users remaining to process after filtering.")
         return
 
     total      = len(pending)
@@ -129,20 +129,20 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None, 
     batch_no   = 0
 
     print(f"\n{'='*60}")
-    print(f"  BATCH MİGRASYON BAŞLADI")
-    print(f"  Toplam kullanıcı : {total}")
-    print(f"  Batch boyutu     : {batch_size}")
+    print(f"  BATCH MIGRATION STARTED")
+    print(f"  Total users  : {total}")
+    print(f"  Batch size   : {batch_size}")
     if consumer_orgs:
-        print(f"  Org filtresi     : {', '.join(consumer_orgs)}")
+        print(f"  Org filter   : {', '.join(consumer_orgs)}")
     if usernames:
-        print(f"  User filtresi    : {', '.join(usernames)}")
+        print(f"  User filter  : {', '.join(usernames)}")
     if limit is not None:
-        print(f"  Limit            : {limit}")
+        print(f"  Limit        : {limit}")
     if dry_run:
-        print("  MOD              : DRY-RUN (hiçbir şey değiştirilmez)")
+        print("  MODE             : DRY-RUN (no changes will be made)")
     print(f"{'='*60}\n")
 
-    # Kullanıcıları batch_size'lık gruplara böl
+    # Split users into groups of batch_size
     for batch_start in range(0, total, batch_size):
         batch_no  += 1
         batch      = pending[batch_start : batch_start + batch_size]
@@ -150,7 +150,7 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None, 
         b_fail     = 0
         b_failed_users = []
 
-        print(f"--- BATCH {batch_no} ({len(batch)} kullanıcı) ---")
+        print(f"--- BATCH {batch_no} ({len(batch)} users) ---")
 
         for user in batch:
             username = user["username"]
@@ -166,20 +166,20 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None, 
                 fail_ct += 1
                 b_failed_users.append(username)
 
-        # Her batch sonunda özet
-        print(f"\n  Batch {batch_no} özeti: {b_success} başarılı / {b_fail} başarısız")
+        # Summary after each batch
+        print(f"\n  Batch {batch_no} summary: {b_success} succeeded / {b_fail} failed")
         if b_failed_users:
-            print(f"  Başarısız: {', '.join(b_failed_users)}")
+            print(f"  Failed: {', '.join(b_failed_users)}")
 
-        # Canlı CSV durumunu dosyaya yaz
+        # Write live CSV status to file
         rpt = write_status_report()
-        print(f"\n  [SNAPSHOT] Batch {batch_no} sonu → {rpt}")
+        print(f"\n  [SNAPSHOT] End of batch {batch_no} → {rpt}")
 
-    # Genel özet
+    # Overall summary
     print(f"\n{'='*60}")
-    print(f"  BATCH MİGRASYON TAMAMLANDI")
-    print(f"  Başarılı : {success_ct} / {total}")
-    print(f"  Başarısız: {fail_ct} / {total}")
+    print(f"  BATCH MIGRATION COMPLETED")
+    print(f"  Succeeded : {success_ct} / {total}")
+    print(f"  Failed    : {fail_ct} / {total}")
     print(f"{'='*60}\n")
 
     if fail_ct > 0:
@@ -192,30 +192,30 @@ def run_batch(batch_size=BATCH_SIZE, dry_run=False, limit=None, usernames=None, 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="migration_users.csv'deki kullanıcıları batch olarak migrate eder.",
+        description="Migrates users from migration_users.csv in batches.",
         prog="04_run_migration.py"
     )
     parser.add_argument(
         "--batch-size", type=int, default=BATCH_SIZE,
-        help=f"Bir batch'teki kullanıcı sayısı (varsayılan: {BATCH_SIZE})"
+        help=f"Number of users per batch (default: {BATCH_SIZE})"
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Adımları listele, gerçekten çalıştırma"
+        help="List steps without executing them"
     )
     parser.add_argument(
         "--consumer-org", nargs="+", dest="consumer_orgs", default=None,
         metavar="ORG",
-        help="Sadece belirtilen consumer org'ları migrate et (boşlukla ayırarak birden fazla verilebilir)"
+        help="Migrate only the specified consumer orgs (space-separated for multiple)"
     )
     parser.add_argument(
         "--limit", type=int, default=None,
-        help="İşlenecek maksimum kullanıcı sayısı (varsayılan: sınırsız)"
+        help="Maximum number of users to process (default: unlimited)"
     )
     parser.add_argument(
         "--username", nargs="+", dest="usernames", default=None,
         metavar="USERNAME",
-        help="Sadece belirtilen kullanıcıları migrate et (boşlukla ayırarak birden fazla verilebilir)"
+        help="Migrate only the specified users (space-separated for multiple)"
     )
     args = parser.parse_args()
 
